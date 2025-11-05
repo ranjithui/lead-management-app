@@ -1,13 +1,18 @@
 # app.py
 """
-Lead Management App — One-page Modern Dashboard + Full CRUD Admin
-- Single JSON data file on GitHub: data/leads_data.json
-- Tabs: Daily Update, Dashboard (one-page card view), Reports, Admin (full CRUD)
-- Filters on Dashboard: All Time | This Month | This Week
-- Progress bars for weekly & monthly vs targets
-- Uses Streamlit secrets for GitHub token and admin password
+Lead Management App — final production-ready version, with inline comments.
 
-.streamlit/secrets.toml example:
+Features:
+- One-page Dashboard (cards) with filter: All Time | This Month | This Week
+- Progress bars (weekly & monthly) per member (cumulative totals vs targets)
+- Daily Update (log leads)
+- Reports (filter & export CSV)
+- Admin Panel: full CRUD for teams and members (add / edit / delete)
+- Unified JSON data file in repo: data/leads_data.json
+- GitHub Contents API for read/write (token in secrets)
+- Uses st.rerun() for refreshes (compatible with current Streamlit)
+
+.secrets.toml example:
 
 [github]
 token = "ghp_xxx"
@@ -20,7 +25,8 @@ password = "your-admin-password"
 """
 
 import streamlit as st
-import requests, json
+import requests
+import json
 from base64 import b64encode, b64decode
 from datetime import date, datetime, timedelta
 import pandas as pd
@@ -42,10 +48,15 @@ HEADERS = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
 # GitHub helpers
 # -----------------------
 def gh_api_url():
+    """Construct GitHub Contents API url for the data file."""
     return f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{DATA_PATH}"
 
 def load_data():
-    """Return (data_dict, sha) or (default_data, None)"""
+    """
+    Load the unified JSON from GitHub.
+    Returns: (data_dict, sha) — sha is needed for updating the same file.
+    If file not present, returns default structure and sha None.
+    """
     url = gh_api_url()
     res = requests.get(url, headers=HEADERS)
     if res.status_code == 200:
@@ -55,14 +66,22 @@ def load_data():
             data = json.loads(content)
             return data, payload.get("sha")
         except Exception:
+            # Malformed JSON — return defaults (safe fallback)
             return {"teams": [], "leads": []}, None
     elif res.status_code == 404:
+        # File doesn't exist yet
         return {"teams": [], "leads": []}, None
     else:
         st.error(f"GitHub read error {res.status_code}: {res.text}")
         return {"teams": [], "leads": []}, None
 
 def save_data(data, message, sha=None):
+    """
+    Save the entire unified data back to GitHub.
+    message: commit message
+    sha: if provided, used to update existing file
+    Returns True on success.
+    """
     url = gh_api_url()
     content = b64encode(json.dumps(data, indent=2, ensure_ascii=False).encode()).decode()
     body = {"message": message, "content": content}
@@ -74,11 +93,15 @@ def save_data(data, message, sha=None):
 # -----------------------
 # Utilities
 # -----------------------
-def gen_id(prefix):
+def gen_id(prefix="ID"):
+    """Generate short random id with prefix."""
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
 def flatten_members(data):
-    """Return list of members with team info"""
+    """
+    Flatten teams -> members into a list of members with team metadata.
+    Useful for merges and reporting.
+    """
     members = []
     for t in data.get("teams", []):
         for m in t.get("members", []):
@@ -88,51 +111,55 @@ def flatten_members(data):
             members.append(mm)
     return members
 
-def ensure_data_file_created(data, sha):
-    """If data is default (no teams/leads) and sha is None, create file in repo.
-       This helps first-time bootstrap. Returns True if created."""
-    if sha is None:
-        ok = save_data(data, "Initialize leads_data.json", sha=None)
-        return ok
-    return False
-
 # -----------------------
 # Aggregation helpers
 # -----------------------
-def calc_totals(leads, members_df, period="All Time"):
+def calc_totals(leads_df, members_df, period="All Time"):
     """
-    leads: DataFrame with columns ['date','member_id','lead_count',...]
-    members_df: DataFrame of members (member_id, name, team_id, team_name, weekly_target, monthly_target)
-    period: "All Time" | "This Month" | "This Week"
-    Returns aggregated DataFrame with totals per member and team-level summaries
+    Calculate per-member totals and team aggregates for a period.
+    - leads_df: DataFrame of leads (columns: date, member_id, lead_count)
+    - members_df: DataFrame of members with targets
+    - period: "All Time" | "This Month" | "This Week"
+    Returns:
+      - member_agg: DataFrame with member totals & percent columns
+      - team_agg: DataFrame with team totals and average %s
     """
-    if leads.empty:
-        # return empty frames shaped appropriately
-        cols = ["member_id","name","team_id","team_name","total_leads","weekly_target","monthly_target"]
-        return pd.DataFrame(columns=cols), pd.DataFrame(columns=["team_id","team_name","team_leads","avg_weekly_pct","avg_monthly_pct"])
+    # If no leads, prepare empty shapes
+    if leads_df is None or leads_df.empty:
+        member_cols = ["member_id", "name", "team_id", "team_name", "total_leads", "weekly_target", "monthly_target", "weekly_pct", "monthly_pct"]
+        return pd.DataFrame(columns=member_cols), pd.DataFrame(columns=["team_id", "team_name", "team_leads", "avg_weekly_pct", "avg_monthly_pct"])
 
-    df = leads.copy()
+    df = leads_df.copy()
     df["date"] = pd.to_datetime(df["date"])
 
     today = pd.to_datetime(date.today())
-    if period == "This Week":
-        start = today - pd.Timedelta(days=7)
-        df = df[df["date"] >= start]
-    elif period == "This Month":
-        start = today.replace(day=1)
-        df = df[df["date"] >= start]
-    # else All Time: no filtering
 
-    member_tot = df.groupby("member_id", as_index=False)["lead_count"].sum().rename(columns={"lead_count":"total_leads"})
+    # Filter by period
+    if period == "This Week":
+        cutoff = today - pd.Timedelta(days=7)
+        df = df[df["date"] >= cutoff]
+    elif period == "This Month":
+        cutoff = today.replace(day=1)
+        df = df[df["date"] >= cutoff]
+    # else All Time: no filter
+
+    # Sum per member
+    member_tot = df.groupby("member_id", as_index=False)["lead_count"].sum().rename(columns={"lead_count": "total_leads"})
+
+    # Merge with members to keep targets and team info
+    if members_df is None or members_df.empty:
+        members_df = pd.DataFrame(columns=["member_id","name","team_id","team_name","weekly_target","monthly_target"])
+
     merged = members_df.merge(member_tot, on="member_id", how="left")
     merged["total_leads"] = merged["total_leads"].fillna(0).astype(int)
-    merged["weekly_target"] = merged["weekly_target"].fillna(0).astype(int)
-    merged["monthly_target"] = merged["monthly_target"].fillna(0).astype(int)
-    # percent (avoid div by zero)
-    merged["weekly_pct"] = merged.apply(lambda r: (r["total_leads"]/r["weekly_target"]*100) if r["weekly_target"]>0 else 0, axis=1)
-    merged["monthly_pct"] = merged.apply(lambda r: (r["total_leads"]/r["monthly_target"]*100) if r["monthly_target"]>0 else 0, axis=1)
+    merged["weekly_target"] = merged.get("weekly_target", 0).fillna(0).astype(int) if "weekly_target" in merged else 0
+    merged["monthly_target"] = merged.get("monthly_target", 0).fillna(0).astype(int) if "monthly_target" in merged else 0
 
-    # team summary
+    # Percentages relative to targets (avoid division by zero)
+    merged["weekly_pct"] = merged.apply(lambda r: (r["total_leads"] / r["weekly_target"] * 100) if r.get("weekly_target",0) > 0 else 0, axis=1)
+    merged["monthly_pct"] = merged.apply(lambda r: (r["total_leads"] / r["monthly_target"] * 100) if r.get("monthly_target",0) > 0 else 0, axis=1)
+
+    # Team aggregation: team totals and average of member %s
     team_grp = merged.groupby(["team_id","team_name"], as_index=False).agg({
         "total_leads":"sum",
         "weekly_pct":"mean",
@@ -142,177 +169,190 @@ def calc_totals(leads, members_df, period="All Time"):
     return merged, team_grp
 
 # -----------------------
-# UI helpers (cards / progress)
+# UI helper: styling + progress bar rendering
 # -----------------------
-CARD_STYLE = """
+CARD_CSS = """
 <style>
-.card { background: #ffffff; padding: 16px; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); margin-bottom: 12px;}
+.card { background: #ffffff; padding: 14px; border-radius: 10px; box-shadow: 0 1px 6px rgba(0,0,0,0.08); margin-bottom: 12px; }
 .team-header { display:flex; justify-content: space-between; align-items:center; }
 .team-title { font-size:18px; font-weight:600; }
 .small { color: #6c6c6c; font-size:13px; }
 .member-card { background:#f8f9fb; padding:10px; border-radius:8px; margin-bottom:8px; }
-.progress-bar { height:12px; border-radius:8px; background:#e6e6e6; overflow:hidden; }
+.progress-bar { height:12px; border-radius:8px; background:#e6e6e6; overflow:hidden; margin-top:6px; }
 .progress-fill { height:100%; border-radius:8px; }
 .badge { font-size:12px; padding:4px 8px; border-radius:12px; background:#efefef; }
 </style>
 """
 
 def progress_color_and_width(pct):
-    """Return (color_hex, width_percent)"""
-    if pct < 0:
-        pct = 0
+    """Return color hex and width percentage (clamped)."""
+    pct = max(0.0, float(pct))
     if pct < 50:
         color = "#e24b4b"  # red
     elif pct < 80:
-        color = "#f0b429"  # yellow/orange
+        color = "#f0b429"  # yellow
     else:
         color = "#16a34a"  # green
-    width = min(round(pct,1), 100)
+    width = min(round(pct, 1), 100)
     return color, width
 
-def render_progress_bar(pct, target_label):
+def render_progress_bar_html(pct, label_text):
+    """Return HTML for a labeled progress bar."""
     color, width = progress_color_and_width(pct)
-    bar_html = f"""
-    <div style="display:flex; justify-content:space-between; align-items:center;">
-      <div class="small">{target_label}</div>
+    html = f"""
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+      <div class="small">{label_text}</div>
       <div class="badge">{pct:.1f}%</div>
     </div>
-    <div class="progress-bar" role="progressbar" aria-valuenow="{pct}">
+    <div class="progress-bar">
       <div class="progress-fill" style="width:{width}%; background:{color};"></div>
     </div>
     """
-    return bar_html
+    return html
 
 # -----------------------
-# App layout & logic
+# Main app layout
 # -----------------------
-st.set_page_config(page_title="Lead Management Dashboard", layout="wide")
-st.markdown(CARD_STYLE, unsafe_allow_html=True)
-st.title("📊 Lead Management — Dashboard")
+st.set_page_config(page_title="Lead Management", layout="wide")
+st.markdown(CARD_CSS, unsafe_allow_html=True)
+st.title("📊 Lead Management — Unified Dashboard")
 
-# Load data
+# Load data from GitHub
 data, sha = load_data()
-# auto-create data file if missing
-if sha is None and data.get("teams") == [] and data.get("leads") == []:
-    # create initial file if not exists (safe)
-    created = ensure_created = False
-    try:
-        created = save_data({"teams": [], "leads": []}, "Initialize leads_data.json")
-    except Exception:
-        created = False
+
+# If repository doesn't have file yet, create it (bootstrap)
+if sha is None and data.get("teams", []) == [] and data.get("leads", []) == []:
+    # Attempt to create the file (safe first-run behavior)
+    created = save_data({"teams": [], "leads": []}, "Initialize leads_data.json")
     if created:
         data, sha = load_data()
 
-# Top-level tabs (Daily Update, Dashboard, Report, Admin)
-tabs = st.tabs(["Daily Update", "Dashboard", "Report", "Admin Panel"])
+# Top-level tabs
+tabs = st.tabs(["Daily Update", "Dashboard", "Reports", "Admin Panel"])
 
 # -----------------------
-# Tab 1 — Daily Update
+# Tab: Daily Update
 # -----------------------
 with tabs[0]:
     st.header("🕘 Daily Update")
     teams = data.get("teams", [])
     if not teams:
-        st.info("No teams defined yet. Create teams & members in Admin Panel.")
+        st.info("No teams defined yet. Create them in Admin Panel before logging leads.")
     else:
-        col1, col2 = st.columns([2,1])
+        # Left: form. Right: quick stats
+        col1, col2 = st.columns([2, 1])
         with col1:
             team_names = [t["team_name"] for t in teams]
-            team_sel = st.selectbox("Select Team", team_names)
-            team = next(t for t in teams if t["team_name"] == team_sel)
-            member_names = [m["name"] for m in team.get("members",[])]
-            member_sel = st.selectbox("Select Member", member_names)
+            team_choice = st.selectbox("Select Team", team_names)
+            team = next(t for t in teams if t["team_name"] == team_choice)
+            member_names = [m["name"] for m in team.get("members", [])]
+            member_choice = st.selectbox("Select Member", member_names)
             dt = st.date_input("Date", value=date.today())
-            cnt = st.number_input("Lead Count", min_value=0, value=0, step=1)
+            lead_count = st.number_input("Lead Count", min_value=0, value=0, step=1)
             notes = st.text_area("Notes (optional)", height=80)
+
             if st.button("💾 Save Lead"):
-                entry = {"date": dt.strftime("%Y-%m-%d"),
-                         "team_id": team["team_id"],
-                         "member_id": next(m["member_id"] for m in team["members"] if m["name"]==member_sel),
-                         "lead_count": int(cnt),
-                         "notes": notes or ""}
+                # Create entry and append to data
+                entry = {
+                    "date": dt.strftime("%Y-%m-%d"),
+                    "team_id": team["team_id"],
+                    "member_id": next(m["member_id"] for m in team["members"] if m["name"] == member_choice),
+                    "lead_count": int(lead_count),
+                    "notes": notes or ""
+                }
                 data.setdefault("leads", []).append(entry)
-                if save_data(data, f"Add lead for {member_sel}", sha):
+                if save_data(data, f"Add lead: {member_choice} {entry['date']}", sha):
                     st.success("Lead saved ✅")
-                    st.experimental_rerun()
+                    st.rerun()   # refresh UI
                 else:
-                    st.error("Failed to save. Check GitHub token/permissions.")
+                    st.error("Failed to save lead. Check GitHub permissions & token.")
+
         with col2:
             st.markdown("#### Quick Stats")
             leads_all = pd.DataFrame(data.get("leads", []))
-            if not leads_all.empty:
+            if leads_all.empty:
+                st.write("No leads yet.")
+            else:
                 leads_all["date"] = pd.to_datetime(leads_all["date"])
                 today = pd.to_datetime(date.today())
-                today_total = int(leads_all[leads_all["date"]==today]["lead_count"].sum())
+                today_total = int(leads_all[leads_all["date"] == today]["lead_count"].sum())
                 st.metric("Today's leads", today_total)
-            else:
-                st.write("No leads yet.")
 
 # -----------------------
-# Tab 2 — Dashboard (one-page card)
+# Tab: Dashboard (one-page)
 # -----------------------
 with tabs[1]:
-    st.header("📈 One-page Dashboard")
-    # Filter
-    filter_opt = st.selectbox("Period filter", ["All Time", "This Month", "This Week"], index=0)
-    # Prepare leads and members
-    leads_raw = pd.DataFrame(data.get("leads", []))
-    members_list = flatten_members(data)
-    members_df = pd.DataFrame(members_list) if members_list else pd.DataFrame(columns=[
-        "member_id","name","team_id","team_name","weekly_target","monthly_target"
-    ])
-    if leads_raw.empty:
-        st.info("No leads yet — use Daily Update to add leads.")
-    # Compute totals by chosen period
-    member_agg, team_agg = calc_totals(leads_raw, members_df, period=filter_opt)
+    st.header("📈 One-Page Dashboard")
+    # Period filter
+    period = st.selectbox("Period filter", ["All Time", "This Month", "This Week"], index=0)
 
-    # Render teams as cards in columns (2 per row)
+    # Prepare DataFrames
+    leads_df = pd.DataFrame(data.get("leads", []))
+    members_flat = flatten_members(data)
+    members_df = pd.DataFrame(members_flat) if members_flat else pd.DataFrame(columns=["member_id","name","team_id","team_name","weekly_target","monthly_target"])
+
+    # If no leads, inform
+    if leads_df.empty:
+        st.info("No leads logged yet — dashboard will populate once you add leads.")
+    # Compute aggregates (member + team)
+    member_agg, team_agg = calc_totals(leads_df, members_df, period=period)
+
+    # Layout: show cards two per row
     teams = data.get("teams", [])
     if not teams:
-        st.info("No teams. Add teams in Admin panel.")
+        st.info("No teams defined. Add teams in the Admin Panel.")
     else:
-        cards_per_row = 2
-        for i in range(0, len(teams), cards_per_row):
-            cols = st.columns(cards_per_row)
-            for col_idx, team in enumerate(teams[i:i+cards_per_row]):
-                with cols[col_idx]:
-                    # Team card
-                    team_id = team["team_id"]
-                    trow = team_agg[team_agg["team_id"]==team_id]
+        # Two columns per row
+        per_row = 2
+        for start in range(0, len(teams), per_row):
+            cols = st.columns(per_row)
+            slice_teams = teams[start:start+per_row]
+            for idx, team in enumerate(slice_teams):
+                with cols[idx]:
+                    # Team summary
+                    t_id = team["team_id"]
+                    trow = team_agg[team_agg["team_id"] == t_id] if not team_agg.empty else pd.DataFrame()
                     team_leads = int(trow["team_leads"].iloc[0]) if not trow.empty else 0
-                    team_week_avg = float(trow["avg_weekly_pct"].iloc[0]) if not trow.empty else 0.0
-                    team_month_avg = float(trow["avg_monthly_pct"].iloc[0]) if not trow.empty else 0.0
+                    avg_week = float(trow["avg_weekly_pct"].iloc[0]) if not trow.empty else 0.0
+                    avg_month = float(trow["avg_monthly_pct"].iloc[0]) if not trow.empty else 0.0
+                    team_avg = (avg_week + avg_month) / 2 if (avg_week or avg_month) else 0.0
 
+                    # Team card header
                     st.markdown(f"<div class='card'><div class='team-header'><div class='team-title'>🏷 {team['team_name']}</div><div class='small'>Total leads: <strong>{team_leads}</strong></div></div>", unsafe_allow_html=True)
 
-                    # Team average bar (use average of weekly and monthly averages)
-                    team_avg_combined = (team_week_avg + team_month_avg) / 2 if (team_week_avg or team_month_avg) else 0
-                    team_bar_html = render_progress_bar(team_avg_combined, "Avg progress (weekly vs monthly)")
-                    st.markdown(team_bar_html, unsafe_allow_html=True)
+                    # Team average progress bar
+                    st.markdown(render_progress_bar_html(team_avg, "Avg (weekly vs monthly)"), unsafe_allow_html=True)
 
                     st.markdown("<div style='margin-top:8px; font-weight:600;'>Members</div>", unsafe_allow_html=True)
-                    # Member cards inside
-                    members_in_team = members_df[members_df["team_id"]==team_id]
+
+                    # Members list (sorted)
+                    members_in_team = members_df[members_df["team_id"] == t_id].sort_values("name") if not members_df.empty else pd.DataFrame()
                     if members_in_team.empty:
                         st.markdown("<div class='small'>No members yet</div>", unsafe_allow_html=True)
                     else:
-                        for _, m in members_in_team.sort_values("name").iterrows():
+                        for _, m in members_in_team.iterrows():
                             mid = m["member_id"]
                             name = m["name"]
-                            total = int(member_agg.loc[member_agg["member_id"]==mid, "total_leads"].iloc[0]) if not member_agg.empty and (mid in member_agg["member_id"].values) else 0
-                            w_pct = float(member_agg.loc[member_agg["member_id"]==mid, "weekly_pct"].iloc[0]) if not member_agg.empty and (mid in member_agg["member_id"].values) else 0.0
-                            mo_pct = float(member_agg.loc[member_agg["member_id"]==mid, "monthly_pct"].iloc[0]) if not member_agg.empty and (mid in member_agg["member_id"].values) else 0.0
                             weekly_target = int(m.get("weekly_target", 0))
                             monthly_target = int(m.get("monthly_target", 0))
+                            total_leads = 0
+                            weekly_pct = 0.0
+                            monthly_pct = 0.0
+                            if not member_agg.empty and mid in member_agg["member_id"].values:
+                                row = member_agg[member_agg["member_id"] == mid].iloc[0]
+                                total_leads = int(row["total_leads"])
+                                weekly_pct = float(row["weekly_pct"])
+                                monthly_pct = float(row["monthly_pct"])
 
+                            # Member card: name + totals + two progress bars
                             member_html = f"""
                             <div class='member-card'>
                               <div style='display:flex; justify-content:space-between; align-items:center;'>
                                 <div style='font-weight:600;'>{name}</div>
-                                <div class='small'>Leads: <strong>{total}</strong></div>
+                                <div class='small'>Leads: <strong>{total_leads}</strong></div>
                               </div>
-                              <div style='margin-top:6px'>{render_progress_bar(w_pct, f'Weekly ({total}/{weekly_target})')}</div>
-                              <div style='margin-top:6px'>{render_progress_bar(mo_pct, f'Monthly ({total}/{monthly_target})')}</div>
+                              <div style='margin-top:6px'>{render_progress_bar_html(weekly_pct, f'Weekly ({total_leads}/{weekly_target})')}</div>
+                              <div style='margin-top:6px'>{render_progress_bar_html(monthly_pct, f'Monthly ({total_leads}/{monthly_target})')}</div>
                             </div>
                             """
                             st.markdown(member_html, unsafe_allow_html=True)
@@ -320,92 +360,95 @@ with tabs[1]:
                     st.markdown("</div>", unsafe_allow_html=True)  # close team card
 
 # -----------------------
-# Tab 3 — Reports
+# Tab: Reports
 # -----------------------
 with tabs[2]:
     st.header("📜 Reports")
     leads_df = pd.DataFrame(data.get("leads", []))
     if leads_df.empty:
-        st.info("No leads to report.")
+        st.info("No leads to show.")
     else:
         leads_df["date"] = pd.to_datetime(leads_df["date"])
         members_df = pd.DataFrame(flatten_members(data))
         merged = leads_df.merge(members_df, on="member_id", how="left")
-        start_dt, end_dt = st.date_input("Select date range", [date.today().replace(day=1), date.today()])
+        start_dt, end_dt = st.date_input("Date range", [date.today().replace(day=1), date.today()])
         mask = (merged["date"] >= pd.to_datetime(start_dt)) & (merged["date"] <= pd.to_datetime(end_dt))
         filtered = merged.loc[mask].sort_values("date", ascending=False)
         st.dataframe(filtered, use_container_width=True)
         csv = filtered.to_csv(index=False)
-        st.download_button("⬇️ Download CSV", data=csv, file_name=f"leads_{start_dt}_{end_dt}.csv", mime="text/csv")
+        st.download_button("⬇️ Download CSV", data=csv, file_name=f"lead_report_{start_dt}_{end_dt}.csv", mime="text/csv")
 
 # -----------------------
-# Tab 4 — Admin Panel (full CRUD)
+# Tab: Admin Panel (full CRUD)
 # -----------------------
 with tabs[3]:
-    st.header("🧑‍💼 Admin Panel")
+    st.header("🧑‍💼 Admin Panel (Teams & Members)")
+
+    # Simple admin auth (password in secrets)
     if "admin_auth" not in st.session_state:
         st.session_state.admin_auth = False
 
-    # login
     if not st.session_state.admin_auth:
         pw = st.text_input("Admin Password", type="password")
         if st.button("🔐 Login"):
             if pw == ADMIN.get("password"):
                 st.session_state.admin_auth = True
                 st.success("Authenticated")
-                st.experimental_rerun()
+                st.rerun()
             else:
                 st.error("Wrong password")
         st.stop()
 
-    st.subheader("Manage teams & members")
-
-    # Show existing teams with expanders and editing controls
-    if not data.get("teams"):
-        st.info("No teams — add one below.")
+    st.subheader("Manage existing teams")
+    teams_list = data.get("teams", [])
+    if not teams_list:
+        st.info("No teams yet. Add one below.")
     else:
-        for t_idx, team in enumerate(list(data["teams"])):  # list() to avoid mutation issues
+        # Show each team with editing controls
+        for t_idx, team in enumerate(list(teams_list)):  # list() to avoid runtime mutation issues
             with st.expander(f"🏷 {team['team_name']}"):
                 # Edit team name
-                new_team_name = st.text_input("Team name", value=team["team_name"], key=f"team_{t_idx}")
-                if new_team_name != team["team_name"]:
-                    team["team_name"] = new_team_name
-                    if save_data(data, f"Rename team {new_team_name}", sha):
+                new_tname = st.text_input("Team name", value=team["team_name"], key=f"tname_{t_idx}")
+                if new_tname != team["team_name"]:
+                    team["team_name"] = new_tname
+                    if save_data(data, f"Rename team {new_tname}", sha):
                         st.success("Team name updated")
-                        st.experimental_rerun()
+                        st.rerun()
 
                 st.markdown("### Members")
                 for m_idx, member in enumerate(list(team.get("members", []))):
-                    cols = st.columns([3,1,1,1])
+                    cols = st.columns([3, 1, 1, 1])
                     with cols[0]:
-                        new_name = st.text_input("Name", value=member["name"], key=f"name_{t_idx}_{m_idx}")
+                        nm = st.text_input("Name", value=member["name"], key=f"name_{t_idx}_{m_idx}")
                     with cols[1]:
-                        new_weekly = st.number_input("Weekly target", min_value=0, value=int(member.get("weekly_target",0)), key=f"w_{t_idx}_{m_idx}")
+                        wk = st.number_input("Weekly target", min_value=0, value=int(member.get("weekly_target", 0)), key=f"wk_{t_idx}_{m_idx}")
                     with cols[2]:
-                        new_monthly = st.number_input("Monthly target", min_value=0, value=int(member.get("monthly_target",0)), key=f"m_{t_idx}_{m_idx}")
+                        mo = st.number_input("Monthly target", min_value=0, value=int(member.get("monthly_target", 0)), key=f"mo_{t_idx}_{m_idx}")
                     with cols[3]:
-                        if st.button("🗑️", key=f"delmember_{t_idx}_{m_idx}"):
+                        if st.button("🗑️", key=f"delm_{t_idx}_{m_idx}"):
+                            # Delete member
                             team["members"].pop(m_idx)
                             if save_data(data, f"Delete member {member['name']}", sha):
                                 st.success("Member deleted")
-                                st.experimental_rerun()
+                                st.rerun()
 
-                    if new_name != member["name"] or new_weekly != member.get("weekly_target",0) or new_monthly != member.get("monthly_target",0):
-                        member["name"] = new_name
-                        member["weekly_target"] = int(new_weekly)
-                        member["monthly_target"] = int(new_monthly)
-                        if save_data(data, f"Update member {new_name}", sha):
+                    # If changed, save
+                    if nm != member["name"] or wk != member.get("weekly_target", 0) or mo != member.get("monthly_target", 0):
+                        member["name"] = nm
+                        member["weekly_target"] = int(wk)
+                        member["monthly_target"] = int(mo)
+                        if save_data(data, f"Update member {nm}", sha):
                             st.success("Member updated")
-                            st.experimental_rerun()
+                            st.rerun()
 
-                # add member
+                # Add new member inside this team
                 with st.expander("➕ Add member"):
-                    add_name = st.text_input("Member name", key=f"add_name_{t_idx}")
-                    add_weekly = st.number_input("Weekly", min_value=0, key=f"add_w_{t_idx}")
-                    add_monthly = st.number_input("Monthly", min_value=0, key=f"add_m_{t_idx}")
+                    add_name = st.text_input("Member name", key=f"addname_{t_idx}")
+                    add_weekly = st.number_input("Weekly target", min_value=0, key=f"addwk_{t_idx}")
+                    add_monthly = st.number_input("Monthly target", min_value=0, key=f"addmo_{t_idx}")
                     if st.button("Add member", key=f"addbtn_{t_idx}"):
                         if not add_name.strip():
-                            st.error("Enter member name")
+                            st.error("Enter name")
                         else:
                             new_member = {
                                 "name": add_name.strip(),
@@ -416,23 +459,25 @@ with tabs[3]:
                             team["members"].append(new_member)
                             if save_data(data, f"Add member {add_name}", sha):
                                 st.success("Member added")
-                                st.experimental_rerun()
+                                st.rerun()
 
-                # delete team
+                st.markdown("---")
+                # Delete entire team
                 if st.button(f"🗑️ Delete team '{team['team_name']}'", key=f"delteam_{t_idx}"):
                     data["teams"].remove(team)
                     if save_data(data, f"Delete team {team['team_name']}", sha):
                         st.success("Team deleted")
-                        st.experimental_rerun()
+                        st.rerun()
 
-    st.markdown("---")
+    # Section: Add new team
+    st.divider()
     st.subheader("➕ Add new team")
-    with st.form("add_team"):
-        team_name = st.text_input("Team name")
-        n_members = st.number_input("No. of members", min_value=1, max_value=50, value=2)
+    with st.form("add_team_form"):
+        new_team_name = st.text_input("Team name")
+        new_n = st.number_input("No. of members", min_value=1, max_value=50, value=2)
         new_members = []
-        for i in range(int(n_members)):
-            cols = st.columns([3,1,1])
+        for i in range(int(new_n)):
+            cols = st.columns([3, 1, 1])
             with cols[0]:
                 nm = st.text_input(f"Member {i+1} name", key=f"new_nm_{i}")
             with cols[1]:
@@ -446,17 +491,13 @@ with tabs[3]:
                 "monthly_target": int(nmth),
             })
         if st.form_submit_button("Save team"):
-            if not team_name.strip() or any(m["name"]=="" for m in new_members):
+            if not new_team_name.strip() or any(m["name"] == "" for m in new_members):
                 st.error("Fill all fields")
             else:
-                new_team = {"team_id": gen_id("T"), "team_name": team_name.strip(), "members": new_members}
+                new_team = {"team_id": gen_id("T"), "team_name": new_team_name.strip(), "members": new_members}
                 data.setdefault("teams", []).append(new_team)
-                if save_data(data, f"Add team {team_name}", sha):
+                if save_data(data, f"Add team {new_team_name}", sha):
                     st.success("Team added")
-                    st.experimental_rerun()
-                else:
-                    st.error("Failed to save data")
+                    st.rerun()
 
-# -----------------------
 # End of app
-# -----------------------
