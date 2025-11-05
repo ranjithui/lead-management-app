@@ -1,27 +1,37 @@
 # app.py
+"""
+Lead Management Streamlit App
+- 4 tabs: Daily Update, Dashboard, Report, Admin
+- Data stored as JSON files in the same GitHub repo under `data/`
+- Admin can create team + members + targets in one form
+- Uses GitHub Contents API; token stored in Streamlit secrets
+
+Place this file in your app repository. Make sure .streamlit/secrets.toml contains:
+
+[github]
+token = "ghp_xxx"
+repo_owner = "your-github-username"
+repo_name = "your-repo-name"
+data_folder = "data"
+
+[admin]
+password = "your-admin-password"
+
+"""
+
 import streamlit as st
-import pandas as pd
 import requests
 import json
 from base64 import b64encode, b64decode
-from datetime import datetime, date, timedelta
-from typing import Dict, List, Any, Optional
+from datetime import date, datetime
+import pandas as pd
+import uuid
+from typing import Any, Tuple, List, Dict, Optional
 import io
 
-# -----------------------
-# CONFIG / HELPERS
-# -----------------------
-
-# Put these in Streamlit secrets (see README). Example:
-# [github]
-# token = "ghp_xxx"
-# repo_owner = "your-username"
-# repo_name = "lead-management-data"
-# data_folder = "data"
-#
-# [admin]
-# password = "supersecret"
-
+# --------------------
+# Config & secrets
+# --------------------
 GITHUB = st.secrets.get("github", {})
 ADMIN = st.secrets.get("admin", {})
 
@@ -32,79 +42,110 @@ DATA_FOLDER = GITHUB.get("data_folder", "data")
 
 HEADERS = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
 
-# Small utilities
+# --------------------
+# GitHub helpers
+# --------------------
+
 def gh_api_url(path: str) -> str:
     return f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
 
-def read_json_from_github(path: str) -> Any:
+
+def read_json_from_github(path: str) -> Tuple[Optional[Any], Optional[str]]:
+    """Return (data, sha) or (None, None) if not found or error"""
     url = gh_api_url(path)
     res = requests.get(url, headers=HEADERS)
     if res.status_code == 200:
         payload = res.json()
         content = b64decode(payload["content"]).decode()
-        return json.loads(content), payload["sha"]
+        try:
+            return json.loads(content), payload.get("sha")
+        except Exception:
+            return None, None
     elif res.status_code == 404:
-        # Not found: return None to allow creating file
         return None, None
     else:
-        st.error(f"GitHub read error: {res.status_code} {res.text}")
+        st.error(f"GitHub read error {res.status_code}: {res.text}")
         return None, None
 
-def write_json_to_github(path: str, data: Any, message: str, sha: Optional[str]=None) -> bool:
+
+def write_json_to_github(path: str, data: Any, message: str, sha: Optional[str] = None) -> bool:
     url = gh_api_url(path)
     content = b64encode(json.dumps(data, indent=2, ensure_ascii=False).encode()).decode()
     body = {"message": message, "content": content}
     if sha:
         body["sha"] = sha
     res = requests.put(url, headers=HEADERS, data=json.dumps(body))
-    if res.status_code in (200,201):
+    if res.status_code in (200, 201):
         return True
     else:
-        st.error(f"GitHub write error: {res.status_code} {res.text}")
+        st.error(f"GitHub write error {res.status_code}: {res.text}")
         return False
+
 
 def ensure_year_file(year: int) -> None:
     path = f"{DATA_FOLDER}/leads/{year}.json"
     data, sha = read_json_from_github(path)
     if data is None:
-        # create empty list file
-        st.info(f"Creating leads file for year {year} in GitHub.")
         write_json_to_github(path, [], f"Initialize leads for {year}")
 
-# -----------------------
-# DATA ACCESS LAYERS
-# -----------------------
+# --------------------
+# Utility helpers
+# --------------------
+
+def gen_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:8]}"
+
+
+def safe_rerun():
+    try:
+        st.rerun()
+    except Exception:
+        try:
+            st.experimental_rerun()
+        except Exception:
+            pass
+
+# --------------------
+# Data loaders
+# --------------------
 
 def load_teams() -> List[Dict]:
-    path = f"{DATA_FOLDER}/teams.json"
-    data, _ = read_json_from_github(path)
-    if data is None:
-        return []
-    return data
+    data, _ = read_json_from_github(f"{DATA_FOLDER}/teams.json")
+    return data or []
+
 
 def load_members() -> List[Dict]:
-    path = f"{DATA_FOLDER}/members.json"
-    data, _ = read_json_from_github(path)
-    if data is None:
-        return []
-    return data
+    data, _ = read_json_from_github(f"{DATA_FOLDER}/members.json")
+    return data or []
 
-def load_targets(year: int) -> List[Dict]:
-    path = f"{DATA_FOLDER}/targets.json"
-    data, _ = read_json_from_github(path)
-    if data is None:
-        return []
-    # Filter for year (if targets include year)
-    return [t for t in data if t.get("year", year) == year]
+
+def load_targets() -> List[Dict]:
+    data, _ = read_json_from_github(f"{DATA_FOLDER}/targets.json")
+    return data or []
+
 
 def load_leads_for_year(year: int) -> List[Dict]:
-    path = f"{DATA_FOLDER}/leads/{year}.json"
-    data, _ = read_json_from_github(path)
-    if data is None:
-        return []
-    return data
+    data, _ = read_json_from_github(f"{DATA_FOLDER}/leads/{year}.json")
+    return data or []
 
-def append_lead_entry(entry: Dict) -> bool:
+# Save functions that preserve sha to reduce conflicts
+
+def save_teams(teams: List[Dict]) -> bool:
+    _, sha = read_json_from_github(f"{DATA_FOLDER}/teams.json")
+    return write_json_to_github(f"{DATA_FOLDER}/teams.json", teams, "Update teams", sha)
+
+
+def save_members(members: List[Dict]) -> bool:
+    _, sha = read_json_from_github(f"{DATA_FOLDER}/members.json")
+    return write_json_to_github(f"{DATA_FOLDER}/members.json", members, "Update members", sha)
+
+
+def save_targets(targets: List[Dict]) -> bool:
+    _, sha = read_json_from_github(f"{DATA_FOLDER}/targets.json")
+    return write_json_to_github(f"{DATA_FOLDER}/targets.json", targets, "Update targets", sha)
+
+
+def append_lead(entry: Dict) -> bool:
     year = datetime.strptime(entry["date"], "%Y-%m-%d").year
     path = f"{DATA_FOLDER}/leads/{year}.json"
     data, sha = read_json_from_github(path)
@@ -112,30 +153,11 @@ def append_lead_entry(entry: Dict) -> bool:
         data = []
         sha = None
     data.append(entry)
-    success = write_json_to_github(path, data, f"Add lead {entry['member_id']} {entry['date']}", sha)
-    return success
+    return write_json_to_github(path, data, f"Add lead {entry.get('member_id')} {entry.get('date')}", sha)
 
-def save_teams(teams: List[Dict]) -> bool:
-    path = f"{DATA_FOLDER}/teams.json"
-    _, sha = read_json_from_github(path)
-    return write_json_to_github(path, teams, "Update teams", sha)
-
-def save_members(members: List[Dict]) -> bool:
-    path = f"{DATA_FOLDER}/members.json"
-    _, sha = read_json_from_github(path)
-    return write_json_to_github(path, members, "Update members", sha)
-
-def save_targets(all_targets: List[Dict]) -> bool:
-    path = f"{DATA_FOLDER}/targets.json"
-    _, sha = read_json_from_github(path)
-    return write_json_to_github(path, all_targets, "Update targets", sha)
-
-# -----------------------
-# BUSINESS LOGIC
-# -----------------------
-
-def members_by_team(members: List[Dict], team_id: str) -> List[Dict]:
-    return [m for m in members if m.get("team_id") == team_id]
+# --------------------
+# Business helpers
+# --------------------
 
 def member_name(members: List[Dict], member_id: str) -> str:
     for m in members:
@@ -143,40 +165,39 @@ def member_name(members: List[Dict], member_id: str) -> str:
             return m.get("name")
     return member_id
 
-def compute_weekly_monthly(df: pd.DataFrame, targets: List[Dict], year: int):
-    # df: columns ['date','member_id','lead_count']
+# Compute weekly/monthly aggregates
+
+def compute_aggregates(leads: List[Dict], targets: List[Dict]) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    df = pd.DataFrame(leads) if leads else pd.DataFrame(columns=["date", "member_id", "lead_count"])
     if df.empty:
         return pd.DataFrame(), pd.DataFrame()
-    df['date'] = pd.to_datetime(df['date'])
-    # Weekly: ISO week number + year
-    df['iso_year'] = df['date'].dt.isocalendar().year
-    df['iso_week'] = df['date'].dt.isocalendar().week
-    weekly = df.groupby(['iso_year','iso_week','member_id'], as_index=False)['lead_count'].sum()
+    df["date"] = pd.to_datetime(df["date"])
+    df["lead_count"] = df["lead_count"].astype(int)
+    df["year"] = df["date"].dt.year
+    df["month"] = df["date"].dt.month
+    df["iso_year"] = df["date"].dt.isocalendar().year
+    df["iso_week"] = df["date"].dt.isocalendar().week
 
-    # Monthly
-    df['year'] = df['date'].dt.year
-    df['month'] = df['date'].dt.month
-    monthly = df.groupby(['year','month','member_id'], as_index=False)['lead_count'].sum()
+    weekly = df.groupby(["iso_year", "iso_week", "member_id"], as_index=False)["lead_count"].sum()
+    monthly = df.groupby(["year", "month", "member_id"], as_index=False)["lead_count"].sum()
 
-    # attach targets
-    t_df = pd.DataFrame(targets)
-    if t_df.empty:
-        t_df = pd.DataFrame(columns=['member_id','weekly_target','monthly_target','year'])
-    weekly = weekly.merge(t_df[['member_id','weekly_target']], on='member_id', how='left')
-    weekly['weekly_target'] = weekly['weekly_target'].fillna(0).astype(float)
-    weekly['pct'] = (weekly['lead_count'] / weekly['weekly_target'].replace({0: pd.NA}))*100
-    monthly = monthly.merge(t_df[['member_id','monthly_target','year']], on='member_id', how='left')
-    monthly['monthly_target'] = monthly['monthly_target'].fillna(0).astype(float)
-    monthly['pct'] = (monthly['lead_count'] / monthly['monthly_target'].replace({0: pd.NA}))*100
+    tdf = pd.DataFrame(targets) if targets else pd.DataFrame(columns=["member_id", "weekly_target", "monthly_target", "year"])
+    weekly = weekly.merge(tdf[["member_id", "weekly_target"]], on="member_id", how="left")
+    weekly["weekly_target"] = weekly["weekly_target"].fillna(0)
+    weekly["pct"] = weekly.apply(lambda r: (r["lead_count"] / r["weekly_target"] * 100) if r["weekly_target"]>0 else None, axis=1)
+
+    monthly = monthly.merge(tdf[["member_id", "monthly_target", "year"]], on="member_id", how="left")
+    monthly["monthly_target"] = monthly["monthly_target"].fillna(0)
+    monthly["pct"] = monthly.apply(lambda r: (r["lead_count"] / r["monthly_target"] * 100) if r["monthly_target"]>0 else None, axis=1)
+
     return weekly, monthly
 
-# -----------------------
-# UI PAGES
-# -----------------------
+# --------------------
+# Streamlit App UI
+# --------------------
 
 st.set_page_config(page_title="Lead Management", layout="wide")
-
-st.title("📋 Lead Management — Streamlit")
+st.title("📈 Lead Management System")
 
 # Ensure current year file exists
 current_year = date.today().year
@@ -187,255 +208,210 @@ tabs = st.tabs(["Daily Update", "Dashboard", "Report", "Admin Panel"])
 # Load shared data
 teams = load_teams()
 members = load_members()
-targets_all, _ = read_json_from_github(f"{DATA_FOLDER}/targets.json")  # may be None
-if targets_all is None:
-    targets_all = []
-# targets_all is list of dicts
-# (we'll filter per year where needed)
+targets = load_targets()
 
+# ----- Daily Update -----
 with tabs[0]:
     st.header("Daily Update")
-    col1, col2 = st.columns([2,1])
+    col1, col2 = st.columns([3,1])
     with col1:
-        # Team select
         team_options = {t["team_name"]: t["team_id"] for t in teams}
-        selected_team_name = st.selectbox("Select Team", ["-- Select Team --"] + list(team_options.keys()))
-        selected_team_id = team_options.get(selected_team_name) if selected_team_name and selected_team_name != "-- Select Team --" else None
+        team_choice = st.selectbox("Select Team", ["-- Select --"] + list(team_options.keys()))
+        team_id = team_options.get(team_choice) if team_choice and team_choice != "-- Select --" else None
 
-        # Members drop-down
-        if selected_team_id:
-            team_members = members_by_team(members, selected_team_id)
-            member_map = {m["name"]: m["member_id"] for m in team_members}
-            selected_member_name = st.selectbox("Select Member", ["-- Select Member --"] + list(member_map.keys()))
-            selected_member_id = member_map.get(selected_member_name) if selected_member_name and selected_member_name != "-- Select Member --" else None
-        else:
-            selected_member_id = None
-            selected_member_name = None
+        member_map = {m["name"]: m["member_id"] for m in members if m.get("team_id") == team_id} if team_id else {}
+        member_choice = st.selectbox("Select Member", ["-- Select --"] + list(member_map.keys()))
+        member_id = member_map.get(member_choice) if member_choice and member_choice != "-- Select --" else None
 
         dt = st.date_input("Date", value=date.today())
-        lead_count = st.number_input("Lead Count", min_value=0, step=1, value=0)
+        lead_count = st.number_input("Lead Count", min_value=0, value=0, step=1)
         notes = st.text_area("Notes (optional)")
 
         if st.button("Submit Lead"):
-            if not selected_member_id:
-                st.error("Please select a team and member.")
+            if not member_id:
+                st.error("Select a team and member before submitting.")
             else:
                 entry = {
                     "date": dt.strftime("%Y-%m-%d"),
-                    "member_id": selected_member_id,
+                    "member_id": member_id,
                     "lead_count": int(lead_count),
                     "notes": notes or ""
                 }
-                ok = append_lead_entry(entry)
+                ok = append_lead(entry)
                 if ok:
-                    st.success("Lead entry saved to GitHub.")
+                    st.success("Lead saved.")
+                    safe_rerun()
                 else:
-                    st.error("Failed to save. Check GitHub token/permissions.")
-
+                    st.error("Failed to save lead. Check GitHub settings.")
     with col2:
         st.markdown("#### Quick stats")
-        # Show today's totals
-        todays = load_leads_for_year(current_year)
-        if todays:
-            df_today = pd.DataFrame(todays)
-            df_today['date'] = pd.to_datetime(df_today['date'])
-            today_str = date.today().strftime("%Y-%m-%d")
-            total_today = df_today[df_today['date'] == pd.to_datetime(today_str)]['lead_count'].sum()
-            st.metric("Total leads today", int(total_today))
+        leads_this_year = load_leads_for_year(current_year)
+        if leads_this_year:
+            dfy = pd.DataFrame(leads_this_year)
+            dfy["date"] = pd.to_datetime(dfy["date"])
+            today_str = pd.to_datetime(date.today())
+            tot_today = int(dfy[dfy["date"]==today_str]["lead_count"].sum())
+            st.metric("Total today", tot_today)
         else:
-            st.write("No leads yet for the current year.")
+            st.write("No data for current year yet.")
 
+# ----- Dashboard -----
 with tabs[1]:
     st.header("Dashboard")
-    # Load all needed data
-    # Option to pick year / weekly/monthly filters
-    selected_year = st.selectbox("Select Year", options=sorted([current_year] + [current_year-1, current_year-2]), index=0)
+    year_options = sorted(list({current_year, current_year-1, current_year-2}), reverse=True)
+    selected_year = st.selectbox("Select Year", options=year_options, index=0)
+
     leads = load_leads_for_year(int(selected_year))
-    df = pd.DataFrame(leads) if leads else pd.DataFrame(columns=["date","member_id","lead_count"])
-    if not df.empty:
-        df['date'] = pd.to_datetime(df['date'])
-    # load targets for selected_year
-    targets_for_year = [t for t in targets_all if t.get("year", selected_year) == int(selected_year)]
+    weekly_df, monthly_df = compute_aggregates(leads, targets)
 
-    st.subheader("Team and Individual Performance")
-    # Compute team totals
-    if df.empty:
-        st.info("No lead data for selected year.")
-    else:
-        # member-level total for year
-        member_totals = df.groupby('member_id', as_index=False)['lead_count'].sum()
-        member_totals['member_name'] = member_totals['member_id'].apply(lambda x: member_name(members, x))
-        # attach monthly/weekly target
-        t_df = pd.DataFrame(targets_for_year)
-        if t_df.empty:
-            t_df = pd.DataFrame(columns=['member_id','weekly_target','monthly_target','year'])
-        member_totals = member_totals.merge(t_df[['member_id','monthly_target']], on='member_id', how='left')
-        member_totals['monthly_target'] = member_totals['monthly_target'].fillna(0)
-        member_totals['pct_of_monthly'] = (member_totals['lead_count'] / member_totals['monthly_target'].replace({0: pd.NA}))*100
+    st.subheader("Team & Individual Summary")
+    if leads:
+        df_all = pd.DataFrame(leads)
+        df_sum = df_all.groupby('member_id', as_index=False)['lead_count'].sum()
+        df_sum['name'] = df_sum['member_id'].apply(lambda x: member_name(members, x))
+        # merge monthly target
+        tdf = pd.DataFrame(targets)
+        if not tdf.empty:
+            tdf_y = tdf[tdf['year'] == int(selected_year)]
+            df_sum = df_sum.merge(tdf_y[['member_id','monthly_target']], on='member_id', how='left')
+            df_sum['monthly_target'] = df_sum['monthly_target'].fillna(0)
+            df_sum['pct_month'] = df_sum.apply(lambda r: (r['lead_count']/r['monthly_target']*100) if r['monthly_target']>0 else None, axis=1)
+        st.dataframe(df_sum.rename(columns={'lead_count':'Leads (Year)','name':'Member'}))
 
-        st.dataframe(member_totals.rename(columns={
-            "member_id":"Member ID", "member_name":"Name", "lead_count":"Leads (Year)", "monthly_target":"Monthly Target", "pct_of_monthly":"% of Monthly Target"
-        }).fillna(""))
-
-        # Team totals
-        team_map = {t["team_id"]: t["team_name"] for t in teams}
-        # map members to teams
+        # team totals
         mem_df = pd.DataFrame(members)
         if not mem_df.empty:
-            merged = member_totals.merge(mem_df[['member_id','team_id']], on='member_id', how='left')
-            team_totals = merged.groupby('team_id', as_index=False)['lead_count'].sum()
-            team_totals['team_name'] = team_totals['team_id'].map(team_map)
-            st.subheader("Team Totals")
-            st.table(team_totals[['team_name','lead_count']].rename(columns={'team_name':'Team','lead_count':'Leads (Year)'}))
-        else:
-            st.write("No member data to compute team totals.")
+            merged = df_sum.merge(mem_df[['member_id','team_id']], on='member_id', how='left')
+            team_map = {t['team_id']: t['team_name'] for t in teams}
+            team_totals = merged.groupby('team_id', as_index=False)['Leads (Year)'].sum()
+            if not team_totals.empty:
+                team_totals['team_name'] = team_totals['team_id'].map(team_map)
+                st.table(team_totals[['team_name','Leads (Year)']].rename(columns={'team_name':'Team'}))
 
-        # Weekly and monthly breakdowns
-        weekly, monthly = compute_weekly_monthly(df, targets_for_year, int(selected_year))
-        st.subheader("Recent Weekly Snapshot")
-        # Show last 5 iso weeks
-        if not weekly.empty:
-            last_weeks = weekly.sort_values(['iso_year','iso_week'], ascending=[False,False]).head(12)
-            st.dataframe(last_weeks)
+        st.subheader('Monthly snapshot (last months)')
+        if not monthly_df.empty:
+            st.dataframe(monthly_df.sort_values(['year','month'], ascending=[False,False]).head(12))
         else:
-            st.write("No weekly aggregates yet.")
+            st.write('No monthly aggregates yet.')
 
-        st.subheader("Recent Monthly Snapshot")
-        if not monthly.empty:
-            last_months = monthly.sort_values(['year','month'], ascending=[False,False]).head(12)
-            st.dataframe(last_months)
+        st.subheader('Weekly snapshot (recent)')
+        if not weekly_df.empty:
+            st.dataframe(weekly_df.sort_values(['iso_year','iso_week'], ascending=[False,False]).head(12))
         else:
-            st.write("No monthly aggregates yet.")
+            st.write('No weekly aggregates yet.')
+    else:
+        st.info('No lead data for selected year.')
 
+# ----- Report -----
 with tabs[2]:
     st.header("Report")
-    # Filters
-    selected_year_report = st.selectbox("Year (report)", options=[current_year, current_year-1, current_year-2], index=0, key="report_year")
-    leads_report = load_leads_for_year(int(selected_year_report))
-    df_report = pd.DataFrame(leads_report) if leads_report else pd.DataFrame(columns=["date","member_id","lead_count","notes"])
-    if not df_report.empty:
-        df_report['date'] = pd.to_datetime(df_report['date'])
-        # Add member name and team
+    report_year = st.selectbox("Report Year", options=year_options, index=0, key='report_year')
+    leads_rep = load_leads_for_year(int(report_year))
+    df_rep = pd.DataFrame(leads_rep) if leads_rep else pd.DataFrame(columns=['date','member_id','lead_count','notes'])
+    if not df_rep.empty:
+        df_rep['date'] = pd.to_datetime(df_rep['date'])
+        # add member & team
         mem_df = pd.DataFrame(members)
         if not mem_df.empty:
-            df_report = df_report.merge(mem_df[['member_id','name','team_id']], on='member_id', how='left')
-            team_map = {t['team_id']: t['team_name'] for t in teams}
-            df_report['team_name'] = df_report['team_id'].map(team_map)
-        st.write("Filter results")
-        c1, c2, c3 = st.columns([1,1,2])
-        with c1:
-            member_filter = st.selectbox("Member (optional)", options=["All"] + sorted(df_report['name'].dropna().unique().tolist()))
-        with c2:
-            team_filter = st.selectbox("Team (optional)", options=["All"] + sorted([t['team_name'] for t in teams]))
-        with c3:
-            date_range = st.date_input("Date range", value=(date(int(selected_year_report),1,1), date(int(selected_year_report),12,31)))
+            df_rep = df_rep.merge(mem_df[['member_id','name','team_id']], on='member_id', how='left')
+            team_map = {t['team_id']:t['team_name'] for t in teams}
+            df_rep['team_name'] = df_rep['team_id'].map(team_map)
 
-        filtered = df_report.copy()
-        if member_filter and member_filter != "All":
-            filtered = filtered[filtered['name']==member_filter]
-        if team_filter and team_filter != "All":
-            filtered = filtered[filtered['team_name']==team_filter]
+        c1,c2,c3 = st.columns([1,1,2])
+        with c1:
+            mfilter = st.selectbox('Member (optional)', options=['All'] + sorted(df_rep['name'].dropna().unique().tolist()), key='rep_m')
+        with c2:
+            tfilter = st.selectbox('Team (optional)', options=['All'] + sorted([t['team_name'] for t in teams]), key='rep_t')
+        with c3:
+            date_range = st.date_input('Date range', value=(date(int(report_year),1,1), date(int(report_year),12,31)), key='rep_range')
+
+        filtered = df_rep.copy()
+        if mfilter and mfilter != 'All':
+            filtered = filtered[filtered['name']==mfilter]
+        if tfilter and tfilter != 'All':
+            filtered = filtered[filtered['team_name']==tfilter]
         start_dt, end_dt = date_range
-        filtered = filtered[(filtered['date'] >= pd.to_datetime(start_dt)) & (filtered['date'] <= pd.to_datetime(end_dt))]
+        filtered = filtered[(filtered['date']>=pd.to_datetime(start_dt)) & (filtered['date']<=pd.to_datetime(end_dt))]
 
         st.dataframe(filtered.sort_values('date', ascending=False).reset_index(drop=True))
-        # CSV export
         csv = filtered.to_csv(index=False).encode()
-        st.download_button(label="Download CSV", data=csv, file_name=f"leads_{selected_year_report}.csv", mime="text/csv")
+        st.download_button('Download CSV', data=csv, file_name=f'leads_{report_year}.csv', mime='text/csv')
     else:
-        st.info("No lead data for selected year.")
+        st.info('No data for selected year.')
 
+# ----- Admin Panel (single-flow team + members + targets) -----
 with tabs[3]:
-    st.header("Admin Panel")
-    # Simple auth
-    if "admin_authenticated" not in st.session_state:
-        st.session_state["admin_authenticated"] = False
-    if not st.session_state["admin_authenticated"]:
-        pw = st.text_input("Admin password", type="password")
-        if st.button("Login"):
-            if ADMIN.get("password") and pw == ADMIN.get("password"):
-                st.session_state["admin_authenticated"] = True
-                st.success("Authenticated")
+    st.header('Admin Panel')
+    # simple password auth
+    if 'admin_auth' not in st.session_state:
+        st.session_state['admin_auth'] = False
+
+    if not st.session_state['admin_auth']:
+        pw = st.text_input('Admin password', type='password')
+        if st.button('Login'):
+            if ADMIN.get('password') and pw == ADMIN.get('password'):
+                st.session_state['admin_auth'] = True
+                st.success('Authenticated')
+                safe_rerun()
             else:
-                st.error("Incorrect password. Set ADMIN password in Streamlit secrets.")
+                st.error('Incorrect password. Set the admin.password in Streamlit secrets.')
         st.stop()
 
-    st.subheader("Teams")
-    team_df = pd.DataFrame(teams) if teams else pd.DataFrame(columns=["team_id","team_name"])
-    with st.form("teams_form", clear_on_submit=False):
-        st.write("Existing teams")
-        st.dataframe(team_df)
-        new_id = st.text_input("New Team ID (e.g. T10)")
-        new_name = st.text_input("New Team Name")
-        if st.form_submit_button("Add Team"):
-            if not new_id or not new_name:
-                st.error("Provide both ID and name")
+    st.write('Create a new team, add members and set targets in one go.')
+    with st.form('create_team_form'):
+        team_name = st.text_input('Team Name', placeholder='e.g., North Zone')
+        num_members = st.number_input('Number of members to add', min_value=1, max_value=50, value=3)
+
+        members_input = []
+        for i in range(int(num_members)):
+            cols = st.columns([3,1,1])
+            with cols[0]:
+                mname = st.text_input(f'Member {i+1} Name', key=f'mname_{i}')
+            with cols[1]:
+                weekly = st.number_input(f'Weekly target', min_value=0, value=0, key=f'weekly_{i}')
+            with cols[2]:
+                monthly = st.number_input(f'Montly target', min_value=0, value=0, key=f'monthly_{i}')
+            members_input.append({'name': mname.strip(), 'weekly': int(weekly), 'monthly': int(monthly)})
+
+        submit = st.form_submit_button('Save Team & Members')
+
+        if submit:
+            if not team_name or any(m['name']=='' for m in members_input):
+                st.error('Please provide a team name and fill all member names.')
             else:
-                teams.append({"team_id": new_id, "team_name": new_name})
-                ok = save_teams(teams)
-                if ok:
-                    st.success("Team added.")
-                    st.rerun()
+                # load existing datasets
+                teams_list = load_teams()
+                members_list = load_members()
+                targets_list = load_targets()
+
+                # generate team id
+                new_team_id = gen_id('T')
+                teams_list.append({'team_id': new_team_id, 'team_name': team_name})
+
+                current_year = date.today().year
+                for mi in members_input:
+                    new_mid = gen_id('M')
+                    members_list.append({'member_id': new_mid, 'name': mi['name'], 'team_id': new_team_id, 'active': True})
+                    targets_list.append({'member_id': new_mid, 'weekly_target': mi['weekly'], 'monthly_target': mi['monthly'], 'year': current_year})
+
+                ok1 = save_teams(teams_list)
+                ok2 = save_members(members_list)
+                ok3 = save_targets(targets_list)
+
+                if ok1 and ok2 and ok3:
+                    st.success(f"Team '{team_name}' and {len(members_input)} members saved.")
+                    safe_rerun()
+                else:
+                    st.error('Failed to save data to GitHub. Check settings.')
+
+    st.markdown('---')
+    st.subheader('Existing Teams & Members')
+    st.write('Teams')
+    st.dataframe(pd.DataFrame(load_teams()))
+    st.write('Members')
+    st.dataframe(pd.DataFrame(load_members()))
+    st.write('Targets')
+    st.dataframe(pd.DataFrame(load_targets()))
 
 
-    st.subheader("Members")
-    members_df = pd.DataFrame(members) if members else pd.DataFrame(columns=["member_id","name","team_id","active"])
-    with st.form("members_form", clear_on_submit=False):
-        st.write("Existing members")
-        st.dataframe(members_df)
-        new_member_id = st.text_input("New Member ID (e.g. M10)")
-        new_member_name = st.text_input("New Member Name")
-        new_member_team = st.selectbox("Team for member", options=["-- Select --"] + [t["team_name"] for t in teams])
-        is_active = st.checkbox("Active", value=True)
-        if st.form_submit_button("Add Member"):
-            if not new_member_id or not new_member_name or new_member_team == "-- Select --":
-                st.error("Fill all details")
-            else:
-                # find team id
-                team_id = next((t["team_id"] for t in teams if t["team_name"]==new_member_team), None)
-                members.append({"member_id": new_member_id, "name": new_member_name, "team_id": team_id, "active": bool(is_active)})
-                ok = save_members(members)
-                if ok:
-                    st.success("Member added.")
-                    st.experimental_rerun()
-
-    st.subheader("Targets")
-    # targets_all is list (possibly None), we read again for fresh copy
-    targets_all_latest, _ = read_json_from_github(f"{DATA_FOLDER}/targets.json")
-    if targets_all_latest is None:
-        targets_all_latest = []
-    targ_df = pd.DataFrame(targets_all_latest) if targets_all_latest else pd.DataFrame(columns=["member_id","weekly_target","monthly_target","year"])
-    st.write("Current targets")
-    st.dataframe(targ_df)
-
-    with st.form("targets_form", clear_on_submit=False):
-        sel_member = st.selectbox("Member", options=["-- Select --"] + [m["name"] for m in members])
-        sel_member_id = None
-        if sel_member and sel_member != "-- Select --":
-            sel_member_id = next((m["member_id"] for m in members if m["name"]==sel_member), None)
-        new_weekly = st.number_input("Weekly target", min_value=0, value=0, step=1)
-        new_monthly = st.number_input("Monthly target", min_value=0, value=0, step=1)
-        target_year = st.number_input("Year for target", min_value=2000, max_value=2100, value=current_year)
-        if st.form_submit_button("Save target"):
-            if not sel_member_id:
-                st.error("Select a member")
-            else:
-                # remove existing for same member+year
-                updated = [t for t in targets_all_latest if not (t.get("member_id")==sel_member_id and t.get("year")==int(target_year))]
-                updated.append({"member_id": sel_member_id, "weekly_target": int(new_weekly), "monthly_target": int(new_monthly), "year": int(target_year)})
-                ok = save_targets(updated)
-                if ok:
-                    st.success("Saved target.")
-                    st.experimental_rerun()
-
-    st.subheader("Misc")
-    st.write("Repository & data settings")
-    st.write({
-        "GitHub repo": f"{REPO_OWNER}/{REPO_NAME}",
-        "Data folder": DATA_FOLDER,
-        "Current year file": f"{DATA_FOLDER}/leads/{current_year}.json"
-    })
-    if st.button("Ensure year files for next 3 years"):
-        for y in [current_year, current_year+1, current_year+2]:
-            ensure_year_file(y)
-        st.success("Ensured lead files for next 3 years.")
+# End of file
