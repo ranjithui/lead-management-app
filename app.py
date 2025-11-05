@@ -375,7 +375,8 @@ with tabs[3]:
                 ok = save_teams(teams)
                 if ok:
                     st.success("Team added.")
-                    st.experimental_rerun()
+                    st.rerun()
+
 
     st.subheader("Members")
     members_df = pd.DataFrame(members) if members else pd.DataFrame(columns=["member_id","name","team_id","active"])
