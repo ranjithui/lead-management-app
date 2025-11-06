@@ -366,7 +366,7 @@ with st.sidebar.expander("Admin Panel", expanded=False):
             if admin_pw == ADMIN_PASSWORD:
                 st.session_state.admin_auth = True
                 st.success("Admin unlocked ✅")
-                st.experimental_rerun()
+                st.rerun()
             else:
                 st.error("Wrong password")
 
