@@ -332,7 +332,7 @@ with st.sidebar.expander("Daily Update", expanded=True):
             if daily_pw == UPDATE_PASSWORD:
                 st.session_state.daily_auth = True
                 st.success("Daily Update unlocked ✅")
-                st.experimental_rerun()
+                st.rerun()
             else:
                 st.error("Wrong password")
 
