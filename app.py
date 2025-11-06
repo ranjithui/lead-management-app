@@ -349,7 +349,7 @@ with st.sidebar.expander("Reports", expanded=False):
             if report_pw == REPORT_PASSWORD:
                 st.session_state.report_auth = True
                 st.success("Reports unlocked ✅")
-                st.experimental_rerun()
+                st.rerun()
             else:
                 st.error("Wrong password")
 
