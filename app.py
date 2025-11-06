@@ -1,6 +1,6 @@
-# app_fixed.py
 """
 Lead Management App — production-ready with some fixes & improvements
+- Centralized sidebar auth so password login is visible across all tabs
 - More robust GitHub auth header (Bearer)
 - load_data returns decoded data and sha reliably
 - "This Week" uses start-of-week (Monday) instead of 'last 7 days'
@@ -307,6 +307,69 @@ if sha is None and data.get("teams", []) == [] and data.get("leads", []) == []:
     if created:
         data, sha = load_data()
 
+# -----------------------
+# Sidebar: centralized auth controls (always visible)
+# -----------------------
+if "daily_auth" not in st.session_state:
+    st.session_state["daily_auth"] = False
+if "report_auth" not in st.session_state:
+    st.session_state["report_auth"] = False
+if "admin_auth" not in st.session_state:
+    st.session_state["admin_auth"] = False
+
+st.sidebar.header("🔐 Authentication")
+
+# Daily Update auth
+with st.sidebar.expander("Daily Update", expanded=True):
+    if st.session_state.daily_auth:
+        st.success("Daily Update: unlocked")
+        if st.button("Lock Daily Update"):
+            st.session_state.daily_auth = False
+            st.experimental_rerun()
+    else:
+        daily_pw = st.text_input("Daily password", type="password", key="sidebar_daily_pw")
+        if st.button("Unlock Daily Update"):
+            if daily_pw == UPDATE_PASSWORD:
+                st.session_state.daily_auth = True
+                st.success("Daily Update unlocked ✅")
+                st.experimental_rerun()
+            else:
+                st.error("Wrong password")
+
+# Reports auth
+with st.sidebar.expander("Reports", expanded=False):
+    if st.session_state.report_auth:
+        st.success("Reports: unlocked")
+        if st.button("Lock Reports"):
+            st.session_state.report_auth = False
+            st.experimental_rerun()
+    else:
+        report_pw = st.text_input("Reports password", type="password", key="sidebar_report_pw")
+        if st.button("Unlock Reports"):
+            if report_pw == REPORT_PASSWORD:
+                st.session_state.report_auth = True
+                st.success("Reports unlocked ✅")
+                st.experimental_rerun()
+            else:
+                st.error("Wrong password")
+
+# Admin auth
+with st.sidebar.expander("Admin Panel", expanded=False):
+    if st.session_state.admin_auth:
+        st.success("Admin: unlocked")
+        if st.button("Lock Admin Panel"):
+            st.session_state.admin_auth = False
+            st.experimental_rerun()
+    else:
+        admin_pw = st.text_input("Admin password", type="password", key="sidebar_admin_pw")
+        if st.button("Unlock Admin Panel"):
+            if admin_pw == ADMIN_PASSWORD:
+                st.session_state.admin_auth = True
+                st.success("Admin unlocked ✅")
+                st.experimental_rerun()
+            else:
+                st.error("Wrong password")
+
 # Tabs
 tabs = st.tabs(["Dashboard", "Daily Update", "Reports", "Admin Panel"]) 
 
@@ -395,19 +458,9 @@ with tabs[0]:
 with tabs[1]:
     st.header("🕘 Daily Update (password required)")
 
-    if "daily_auth" not in st.session_state:
-        st.session_state.daily_auth = False
-
+    # Check centralized auth state (sidebar)
     if not st.session_state.daily_auth:
-        pw = st.text_input("Enter Daily Update password", type="password", key="daily_pw_input")
-        if st.button("Unlock Daily Update"):
-            if pw == UPDATE_PASSWORD:
-                st.session_state.daily_auth = True
-                st.success("Daily Update unlocked ✅")
-                st.rerun()
-
-            else:
-                st.error("Wrong password")
+        st.warning("Daily Update is locked. Unlock it using the Authentication panel in the sidebar.")
         st.stop()
 
     teams = data.get("teams", [])
@@ -455,19 +508,9 @@ with tabs[1]:
 with tabs[2]:
     st.header("📜 Reports — Weekly / Monthly (password required)")
 
-    if "report_auth" not in st.session_state:
-        st.session_state.report_auth = False
-
+    # centralized auth
     if not st.session_state.report_auth:
-        pw = st.text_input("Enter Reports password", type="password", key="report_pw_input")
-        if st.button("Unlock Reports"):
-            if pw == REPORT_PASSWORD:
-                st.session_state.report_auth = True
-                st.success("Reports unlocked ✅")
-                st.rerun()
-
-            else:
-                st.error("Wrong password")
+        st.warning("Reports are locked. Unlock them using the Authentication panel in the sidebar.")
         st.stop()
 
     st.markdown("Use the controls to pick Weekly or Monthly period, filter by team, add notes, and export.")
@@ -716,19 +759,9 @@ with tabs[2]:
 with tabs[3]:
     st.header("🧑‍💼 Admin Panel (password required)")
 
-    if "admin_auth" not in st.session_state:
-        st.session_state.admin_auth = False
-
+    # centralized auth
     if not st.session_state.admin_auth:
-        pw = st.text_input("Enter Admin password", type="password", key="admin_pw_input")
-        if st.button("Unlock Admin Panel"):
-            if pw == ADMIN_PASSWORD:
-                st.session_state.admin_auth = True
-                st.success("Admin unlocked ✅")
-                st.rerun()
-
-            else:
-                st.error("Wrong password")
+        st.warning("Admin Panel is locked. Unlock it using the Authentication panel in the sidebar.")
         st.stop()
 
     st.subheader("Manage existing teams")
