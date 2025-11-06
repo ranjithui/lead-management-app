@@ -691,20 +691,36 @@ with tabs[2]:
                              file_name=f"{export_name}.csv", mime="text/csv"):
         st.success("CSV ready for download")
 
-    if col2.download_button("⬇️ Download Excel (.xlsx)",
-                             data=lambda: io.BytesIO(),
-                             file_name=f"{export_name}.xlsx",
-                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"):
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            if not team_df.empty:
-                team_df.to_excel(writer, sheet_name="Teams", index=False)
-            if not member_df.empty:
-                member_df.to_excel(writer, sheet_name="Members", index=False)
-        output.seek(0)
-        st.download_button("⬇️ Export Excel File", data=output.getvalue(),
-                           file_name=f"{export_name}.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    # === Export ===
+st.markdown("### 📤 Export Report")
+export_name = f"report_{period_key.replace(':','_')}"
+
+col1, col2 = st.columns(2)
+
+# CSV Export
+col1.download_button(
+    "⬇️ Download CSV",
+    data=member_df.to_csv(index=False).encode("utf-8"),
+    file_name=f"{export_name}.csv",
+    mime="text/csv",
+)
+
+# Excel Export
+excel_buffer = io.BytesIO()
+with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:
+    if not team_df.empty:
+        team_df.to_excel(writer, sheet_name="Teams", index=False)
+    if not member_df.empty:
+        member_df.to_excel(writer, sheet_name="Members", index=False)
+excel_buffer.seek(0)
+
+col2.download_button(
+    "⬇️ Download Excel (.xlsx)",
+    data=excel_buffer.getvalue(),
+    file_name=f"{export_name}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
+
 
 # Admin Panel
 with tabs[3]:
