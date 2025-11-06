@@ -7,6 +7,7 @@ Lead Management App — production-ready with some fixes & improvements
 - Today's leads calculation uses date equality (not timestamp equality)
 - Small UX: require confirmation checkbox before destructive deletes
 - Minor validation on add team/members
+- Additional bug fixes & hardening
 """
 
 import streamlit as st
@@ -57,11 +58,18 @@ def load_data():
         payload = res.json()
         content_b64 = payload.get("content", "")
         try:
+            # GitHub may include newlines; b64decode handles them
             content = b64decode(content_b64).decode()
             data = json.loads(content)
+            # Ensure minimum structure
+            if not isinstance(data, dict):
+                data = {"teams": [], "leads": []}
+            data.setdefault("teams", [])
+            data.setdefault("leads", [])
             return data, payload.get("sha")
         except Exception as e:
             st.error(f"Failed to parse repo content: {e}")
+            # return empty-but-valid structure and still return sha if present
             return {"teams": [], "leads": []}, payload.get("sha")
     elif res.status_code == 404:
         # file not present yet
@@ -76,11 +84,11 @@ def save_data(data, message, sha=None):
     if not REPO_OWNER or not REPO_NAME:
         st.error("GitHub repo_owner/repo_name not set in st.secrets.github.")
         return False
-    content = b64encode(json.dumps(data, indent=2, ensure_ascii=False).encode()).decode()
-    body = {"message": message, "content": content}
-    if sha:
-        body["sha"] = sha
     try:
+        content = b64encode(json.dumps(data, indent=2, ensure_ascii=False).encode()).decode()
+        body = {"message": message, "content": content}
+        if sha:
+            body["sha"] = sha
         res = requests.put(url, headers=HEADERS, data=json.dumps(body), timeout=15)
     except Exception as e:
         st.error(f"GitHub write request failed: {e}")
@@ -102,14 +110,28 @@ def gen_id(prefix="ID"):
 
 
 def flatten_members(data):
+    """
+    Return list of member dicts with team context.
+    Defensive: ensures weekly/monthly targets exist and are ints.
+    """
     members = []
     for t in data.get("teams", []):
+        team_id = t.get("team_id")
+        team_name = t.get("team_name", "")
         for m in t.get("members", []):
             mm = m.copy()
             mm.setdefault("weekly_target", 0)
             mm.setdefault("monthly_target", 0)
-            mm["team_id"] = t["team_id"]
-            mm["team_name"] = t["team_name"]
+            try:
+                mm["weekly_target"] = int(mm.get("weekly_target", 0))
+            except Exception:
+                mm["weekly_target"] = 0
+            try:
+                mm["monthly_target"] = int(mm.get("monthly_target", 0))
+            except Exception:
+                mm["monthly_target"] = 0
+            mm["team_id"] = team_id
+            mm["team_name"] = team_name
             members.append(mm)
     return members
 
@@ -118,11 +140,18 @@ def flatten_members(data):
 # -----------------------
 
 def calc_totals(leads_df, members_df, period="All Time"):
+    """
+    Returns (members_agg_df, team_agg_df)
+    members_agg columns: member_id, name, team_id, team_name, total_leads, weekly_target, monthly_target, weekly_pct, monthly_pct
+    team_agg columns: team_id, team_name, team_leads, avg_weekly_pct, avg_monthly_pct
+    """
+    # Handle empty leads
     if leads_df is None or leads_df.empty:
         member_cols = ["member_id", "name", "team_id", "team_name", "total_leads", "weekly_target", "monthly_target", "weekly_pct", "monthly_pct"]
-        return pd.DataFrame(columns=member_cols), pd.DataFrame(columns=["team_id", "team_name", "team_leads", "avg_weekly_pct", "avg_monthly_pct"]) 
+        return pd.DataFrame(columns=member_cols), pd.DataFrame(columns=["team_id", "team_name", "team_leads", "avg_weekly_pct", "avg_monthly_pct"])
 
     df = leads_df.copy()
+    # normalize date column to date objects
     df["date"] = pd.to_datetime(df["date"]).dt.date
     today = date.today()
 
@@ -134,23 +163,49 @@ def calc_totals(leads_df, members_df, period="All Time"):
         start_of_month = today.replace(day=1)
         df = df[df["date"] >= start_of_month]
 
+    # sum leads per member
+    if "lead_count" not in df.columns:
+        df["lead_count"] = 0
     member_tot = df.groupby("member_id", as_index=False)["lead_count"].sum().rename(columns={"lead_count": "total_leads"})
+
+    # Ensure members_df exists and has expected columns
     if members_df is None or members_df.empty:
-        members_df = pd.DataFrame(columns=["member_id","name","team_id","team_name","weekly_target","monthly_target"])
+        members_df = pd.DataFrame(columns=["member_id", "name", "team_id", "team_name", "weekly_target", "monthly_target"])
 
     merged = members_df.merge(member_tot, on="member_id", how="left")
     merged["total_leads"] = merged["total_leads"].fillna(0).astype(int)
-    merged["weekly_target"] = merged.get("weekly_target", 0).fillna(0).astype(int) if hasattr(merged, 'get') else merged.setdefault("weekly_target", 0)
-    merged["monthly_target"] = merged.get("monthly_target", 0).fillna(0).astype(int) if hasattr(merged, 'get') else merged.setdefault("monthly_target", 0)
 
-    merged["weekly_pct"] = merged.apply(lambda r: (r["total_leads"] / r["weekly_target"] * 100) if r.get("weekly_target",0) > 0 else 0, axis=1)
-    merged["monthly_pct"] = merged.apply(lambda r: (r["total_leads"] / r["monthly_target"] * 100) if r.get("monthly_target",0) > 0 else 0, axis=1)
+    # Ensure target columns exist and are integer
+    for col in ["weekly_target", "monthly_target"]:
+        if col not in merged.columns:
+            merged[col] = 0
+        # coerce to numeric safely
+        merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0).astype(int)
 
-    team_grp = merged.groupby(["team_id","team_name"], as_index=False).agg({
-        "total_leads":"sum",
-        "weekly_pct":"mean",
-        "monthly_pct":"mean"
-    }).rename(columns={"total_leads":"team_leads","weekly_pct":"avg_weekly_pct","monthly_pct":"avg_monthly_pct"})
+    # safe percentage calculation
+    def safe_pct(numer, denom):
+        try:
+            denom = int(denom)
+            if denom <= 0:
+                return 0.0
+            return (float(numer) / denom) * 100.0
+        except Exception:
+            return 0.0
+
+    merged["weekly_pct"] = merged.apply(lambda r: safe_pct(r["total_leads"], r["weekly_target"]), axis=1)
+    merged["monthly_pct"] = merged.apply(lambda r: safe_pct(r["total_leads"], r["monthly_target"]), axis=1)
+
+    # team aggregation
+    team_grp = merged.groupby(["team_id", "team_name"], as_index=False).agg({
+        "total_leads": "sum",
+        "weekly_pct": "mean",
+        "monthly_pct": "mean"
+    }).rename(columns={"total_leads": "team_leads", "weekly_pct": "avg_weekly_pct", "monthly_pct": "avg_monthly_pct"})
+
+    # fill NaNs with zeros (when team has no members, etc)
+    team_grp["team_leads"] = team_grp["team_leads"].fillna(0).astype(int)
+    team_grp["avg_weekly_pct"] = team_grp["avg_weekly_pct"].fillna(0.0)
+    team_grp["avg_monthly_pct"] = team_grp["avg_monthly_pct"].fillna(0.0)
 
     return merged, team_grp
 
@@ -172,7 +227,11 @@ BASE_CSS = """
 
 
 def progress_color_and_width(pct):
-    pct = max(0.0, float(pct))
+    try:
+        pct = float(pct)
+    except Exception:
+        pct = 0.0
+    pct = max(0.0, pct)
     if pct < 60:
         color = "#e24b4b"
     elif pct < 90:
@@ -267,7 +326,7 @@ with tabs[0]:
         teams = data.get("teams", [])
         total_teams = len(teams)
         total_members = len(members_df)
-        total_leads = int(leads_df["lead_count"].sum()) if not leads_df.empty else 0
+        total_leads = int(leads_df["lead_count"].sum()) if "lead_count" in leads_df.columns and not leads_df.empty else 0
         avg_team_pct = 0
         if not team_agg.empty:
             avg_team_pct = (team_agg["avg_weekly_pct"].mean() + team_agg["avg_monthly_pct"].mean()) / 2
@@ -680,10 +739,14 @@ with tabs[3]:
             with st.expander(f"🏷 {team['team_name']}"):
                 new_tname = st.text_input("Team name", value=team["team_name"], key=f"tname_{t_idx}")
                 if new_tname != team["team_name"]:
-                    team["team_name"] = new_tname
-                    if save_data(data, f"Rename team {new_tname}", sha):
-                        st.success("Team name updated")
-                        st.experimental_rerun()
+                    # ensure unique team names
+                    if any(t2["team_name"] == new_tname for t2 in teams_list if t2 is not team):
+                        st.error("A team with this name already exists.")
+                    else:
+                        team["team_name"] = new_tname
+                        if save_data(data, f"Rename team {new_tname}", sha):
+                            st.success("Team name updated")
+                            st.experimental_rerun()
 
                 st.markdown("### Members")
                 for m_idx, member in enumerate(list(team.get("members", []))):
@@ -720,6 +783,8 @@ with tabs[3]:
                     if st.button("Add member", key=f"addbtn_{t_idx}"):
                         if not add_name.strip():
                             st.error("Enter name")
+                        elif any(m.get("name", "").strip().lower() == add_name.strip().lower() for m in team.get("members", [])):
+                            st.error("Member with this name already exists in the team.")
                         else:
                             new_member = {
                                 "name": add_name.strip(),
@@ -759,11 +824,12 @@ with tabs[3]:
                 nw = st.number_input("Weekly target", min_value=0, key=f"new_w_{i}")
             with cols[2]:
                 nmth = st.number_input("Monthly target", min_value=0, key=f"new_m_{i}")
-            if nm.strip() in seen:
+            nm_str = nm.strip()
+            if nm_str.lower() in (s.lower() for s in seen if s):
                 duplicate_name = True
-            seen.add(nm.strip())
+            seen.add(nm_str)
             new_members.append({
-                "name": nm.strip(),
+                "name": nm_str,
                 "member_id": gen_id("M"),
                 "weekly_target": int(nw),
                 "monthly_target": int(nmth),
@@ -773,6 +839,8 @@ with tabs[3]:
                 st.error("Fill all fields")
             elif duplicate_name:
                 st.error("Duplicate member names detected")
+            elif any(t["team_name"].strip().lower() == new_team_name.strip().lower() for t in data.get("teams", [])):
+                st.error("A team with this name already exists.")
             else:
                 new_team = {"team_id": gen_id("T"), "team_name": new_team_name.strip(), "members": new_members}
                 data.setdefault("teams", []).append(new_team)
