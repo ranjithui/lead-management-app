@@ -1,6 +1,14 @@
-# app.py — Lead Management (production-ready)
-# Combined original app with improved Reports section and Excel export fix
-# Keep GitHub-backed data, centralized auth, validation, and UX safeguards.
+"""
+Lead Management App — production-ready with some fixes & improvements
+- Centralized sidebar auth so password login is visible across all tabs
+- More robust GitHub auth header (Bearer)
+- load_data returns decoded data and sha reliably
+- "This Week" uses start-of-week (Monday) instead of 'last 7 days'
+- Today's leads calculation uses date equality (not timestamp equality)
+- Small UX: require confirmation checkbox before destructive deletes
+- Minor validation on add team/members
+- Additional bug fixes & hardening
+"""
 
 import streamlit as st
 import requests
@@ -30,6 +38,7 @@ UPDATE_PASSWORD = PASSWORDS.get("update", "Update@2025")
 # -----------------------
 # GitHub helpers
 # -----------------------
+
 def gh_api_url():
     return f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{DATA_PATH}"
 
@@ -95,6 +104,7 @@ def save_data(data, message, sha=None):
 # -----------------------
 # Utilities
 # -----------------------
+
 def gen_id(prefix="ID"):
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
 
@@ -128,6 +138,7 @@ def flatten_members(data):
 # -----------------------
 # Aggregation helpers
 # -----------------------
+
 def calc_totals(leads_df, members_df, period="All Time"):
     """
     Returns (members_agg_df, team_agg_df)
@@ -247,6 +258,7 @@ def render_progress_bar_html(pct, label_text):
 # -----------------------
 # Small helpers for table coloring (pandas Styler)
 # -----------------------
+
 def pct_to_bg(pct):
     try:
         pct = float(pct)
@@ -359,7 +371,7 @@ with st.sidebar.expander("Admin Panel", expanded=False):
                 st.error("Wrong password")
 
 # Tabs
-tabs = st.tabs(["Dashboard", "Daily Update", "Reports", "Admin Panel"])
+tabs = st.tabs(["Dashboard", "Daily Update", "Reports", "Admin Panel"]) 
 
 # Dashboard
 with tabs[0]:
@@ -489,71 +501,66 @@ with tabs[1]:
                 st.write("No leads yet.")
             else:
                 leads_all["date"] = pd.to_datetime(leads_all["date"]).dt.date
-                # Today's leads use date equality (not timestamp equality)
                 today_total = int(leads_all[leads_all["date"] == date.today()]["lead_count"].sum())
                 st.metric("Today's leads", today_total)
 
-# -----------------------
-# Reports (Improved Layout + Excel fix)
-# -----------------------
+# Reports
 with tabs[2]:
-    st.header("📜 Reports — Weekly / Monthly")
+    st.header("📜 Reports — Weekly / Monthly (password required)")
 
-    # Auth check
+    # centralized auth
     if not st.session_state.report_auth:
         st.warning("Reports are locked. Unlock them using the Authentication panel in the sidebar.")
         st.stop()
 
-    st.markdown("View team and member performance for a selected period. Add notes and export summaries.")
+    st.markdown("Use the controls to pick Weekly or Monthly period, filter by team, add notes, and export.")
+    period_type = st.selectbox("Report type", ["Weekly", "Monthly"], index=0, key="report_type")
 
-    # === Period Selection ===
-    with st.expander("🗓️ Report Period", expanded=True):
-        period_type = st.radio("Report type", ["Weekly", "Monthly"], horizontal=True, key="report_type_radio")
+    if period_type == "Weekly":
+        ref_date = st.date_input("Select a date within the week", value=date.today(), key="report_week_date")
+        weekday = ref_date.weekday()
+        start_dt = ref_date - timedelta(days=weekday)
+        end_dt = start_dt + timedelta(days=6)
+        period_label = f"Week {start_dt.strftime('%Y-%m-%d')} → {end_dt.strftime('%Y-%m-%d')}"
+        period_key = f"weekly:{start_dt.strftime('%Y-%m-%d')}"
+    else:
+        ref_date = st.date_input("Select any date within the month", value=date.today(), key="report_month_date")
+        start_dt = ref_date.replace(day=1)
+        next_month = (start_dt.replace(day=28) + timedelta(days=4)).replace(day=1)
+        end_dt = next_month - timedelta(days=1)
+        period_label = f"Month {start_dt.strftime('%Y-%m')}"
+        period_key = f"monthly:{start_dt.strftime('%Y-%m')}"
 
-        if period_type == "Weekly":
-            ref_date = st.date_input("Select a date within the week", value=date.today(), key="report_week_date")
-            start_dt = ref_date - timedelta(days=ref_date.weekday())
-            end_dt = start_dt + timedelta(days=6)
-            period_label = f"Week {start_dt:%Y-%m-%d} → {end_dt:%Y-%m-%d}"
-            period_key = f"weekly:{start_dt:%Y-%m-%d}"
-        else:
-            ref_date = st.date_input("Select any date within the month", value=date.today(), key="report_month_date")
-            start_dt = ref_date.replace(day=1)
-            next_month = (start_dt.replace(day=28) + timedelta(days=4)).replace(day=1)
-            end_dt = next_month - timedelta(days=1)
-            period_label = f"Month {start_dt:%Y-%m}"
-            period_key = f"monthly:{start_dt:%Y-%m}"
+    st.markdown(f"**Reporting period:** {period_label}")
 
-        st.markdown(f"**📅 Reporting period:** {period_label}")
-
-    # === Data Preparation ===
     leads_df = pd.DataFrame(data.get("leads", []))
     members_flat = flatten_members(data)
     members_df = pd.DataFrame(members_flat) if members_flat else pd.DataFrame(columns=["member_id","name","team_id","team_name","weekly_target","monthly_target"])
 
-    if leads_df.empty:
-        st.info("No leads data found for reporting.")
-        st.stop()
-
-    leads_df["date"] = pd.to_datetime(leads_df["date"]).dt.date
-    mask = (leads_df["date"] >= start_dt) & (leads_df["date"] <= end_dt)
-    period_leads = leads_df.loc[mask].copy()
+    if not leads_df.empty:
+        leads_df["date"] = pd.to_datetime(leads_df["date"]).dt.date
+        mask = (leads_df["date"] >= pd.to_datetime(start_dt).date()) & (leads_df["date"] <= pd.to_datetime(end_dt).date())
+        period_leads = leads_df.loc[mask].copy()
+    else:
+        period_leads = pd.DataFrame(columns=["date","team_id","member_id","lead_count","notes"])
 
     teams = data.get("teams", [])
-    team_names = ["All Teams"] + [t["team_name"] for t in teams]
-    team_sel = st.selectbox("Filter by team", team_names, key="report_team_sel")
+    team_options = ["All Teams"] + [t["team_name"] for t in teams]
+    team_sel = st.selectbox("Team", team_options, index=0, key="report_team_sel")
 
-    if team_sel == "All Teams":
-        team_ids = [t["team_id"] for t in teams]
-        sel_team = None
-    else:
+    if team_sel != "All Teams":
         sel_team = next((t for t in teams if t["team_name"] == team_sel), None)
         team_ids = [sel_team["team_id"]] if sel_team else []
+    else:
+        sel_team = None
+        team_ids = [t["team_id"] for t in teams]
 
-    # === Helper ===
+    team_rows = []
+    member_rows = []
+
     def remark_from_pct(pct):
         if pct <= 0:
-            return "No Target / No Work"
+            return "No Target/No Work"
         if pct >= 100:
             return "Exceeded"
         if pct >= 90:
@@ -562,199 +569,191 @@ with tabs[2]:
             return "Needs Improvement"
         return "Underperforming"
 
-    # === Aggregate ===
-    team_rows, member_rows = [], []
     for t in teams:
         if t["team_id"] not in team_ids:
             continue
+        t_leads_df = period_leads[period_leads["team_id"] == t["team_id"]] if not period_leads.empty else pd.DataFrame()
+        team_total = int(t_leads_df["lead_count"].sum()) if not t_leads_df.empty else 0
         members = t.get("members", [])
-        t_leads = period_leads[period_leads["team_id"] == t["team_id"]] if not period_leads.empty else pd.DataFrame()
-        total = int(t_leads["lead_count"].sum()) if not t_leads.empty else 0
-        target = sum(int(m.get("weekly_target" if period_type == "Weekly" else "monthly_target", 0)) for m in members) if members else 0
-        pct = (total / target * 100) if target > 0 else 0
+        if period_type == "Weekly":
+            team_target = sum(int(m.get("weekly_target", 0)) for m in members) if members else 0
+        else:
+            team_target = sum(int(m.get("monthly_target", 0)) for m in members) if members else 0
+        team_pct = (team_total / team_target * 100) if team_target > 0 else 0.0
         team_rows.append({
             "team_id": t["team_id"],
-            "Team": t["team_name"],
-            "Total Leads": total,
-            "Target": target,
-            "% Achieved": round(pct, 1),
-            "Status": remark_from_pct(pct),
+            "team_name": t["team_name"],
+            "team_total_leads": team_total,
+            "team_target": team_target,
+            "team_pct": round(team_pct, 1),
+            "team_status": remark_from_pct(team_pct),
             "team_note": (t.get("report_notes", {}) or {}).get(period_key, "")
         })
         for m in members:
-            m_leads = int(t_leads[t_leads["member_id"] == m["member_id"]]["lead_count"].sum()) if not t_leads.empty else 0
-            m_target = int(m.get("weekly_target" if period_type == "Weekly" else "monthly_target", 0))
-            m_pct = (m_leads / m_target * 100) if m_target > 0 else 0
+            m_leads = t_leads_df[t_leads_df["member_id"] == m["member_id"]]["lead_count"].sum() if not t_leads_df.empty else 0
+            m_target = int(m.get("weekly_target", 0)) if period_type == "Weekly" else int(m.get("monthly_target", 0))
+            m_pct = (m_leads / m_target * 100) if m_target > 0 else 0.0
             member_rows.append({
                 "team_id": t["team_id"],
-                "Team": t["team_name"],
-                "Member": m["name"],
-                "Leads": m_leads,
-                "Target": m_target,
-                "% Achieved": round(m_pct, 1),
-                "Status": remark_from_pct(m_pct),
+                "team_name": t["team_name"],
+                "member_id": m["member_id"],
+                "member_name": m["name"],
+                "member_total_leads": int(m_leads),
+                "member_target": m_target,
+                "member_pct": round(m_pct, 1),
+                "member_status": remark_from_pct(m_pct),
                 "member_note": (m.get("report_notes", {}) or {}).get(period_key, "")
             })
 
-    team_df = pd.DataFrame(team_rows)
-    member_df = pd.DataFrame(member_rows)
+    team_summary_df = pd.DataFrame(team_rows)
+    member_summary_df = pd.DataFrame(member_rows)
 
-    # === Summary Cards ===
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Teams in View", int(team_df.shape[0]) if not team_df.empty else 0)
-    c2.metric("Members in View", int(member_df.shape[0]) if not member_df.empty else 0)
-    c3.metric(f"Total Leads ({period_type})", int(period_leads["lead_count"].sum()) if not period_leads.empty else 0)
-    avg_perf = member_df['% Achieved'].mean() if not member_df.empty else 0.0
-    c4.metric("Avg Performance", f"{avg_perf:.1f}%")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Teams in view", team_summary_df.shape[0])
+    col2.metric("Members in view", member_summary_df.shape[0])
+    total_leads_all = int(period_leads["lead_count"].sum()) if not period_leads.empty else 0
+    col3.metric(f"Leads ({period_type})", total_leads_all)
+    avg_perf = member_summary_df["member_pct"].mean() if not member_summary_df.empty else 0
+    col4.metric("Avg Member %", f"{avg_perf:.1f}%")
 
-    # === Notes ===
-    st.markdown("### 📝 Notes & Feedback")
-    with st.expander("✍️ Edit Notes (Teams & Members)", expanded=False):
-        # Team note editor (compact)
-        edit_team_name = st.selectbox("Select a team to add/edit notes", ["(none)"] + [t["team_name"] for t in teams], key="edit_team_pick")
-        member_note_edits = {}
-        edit_team = next((t for t in teams if t["team_name"] == edit_team_name), None) if edit_team_name != "(none)" else None
+    st.markdown("---")
+    st.markdown("### ✍️ Notes (Team & Member) — editable and saved to repo")
+    st.markdown("Select a team (or leave All Teams) and edit notes. Click Save to persist notes to GitHub.")
 
+    # Team note editor
+    if sel_team is None:
+        edit_team_name = st.selectbox("Pick team to edit team-note", ["(none)"] + [t["team_name"] for t in teams], index=0, key="edit_team_pick")
+        if edit_team_name != "(none)":
+            edit_team = next(t for t in teams if t["team_name"] == edit_team_name)
+        else:
+            edit_team = None
+    else:
+        edit_team = sel_team
+
+    if edit_team:
+        t_notes = edit_team.get("report_notes", {}) or {}
+        prev = t_notes.get(period_key, "")
+        new_text = st.text_area(f"Team note for {edit_team['team_name']} ({period_label})", value=prev, height=120, key=f"team_note_{edit_team['team_id']}")
+    else:
+        st.text("Choose a team to edit its note.")
+
+    st.markdown("#### Member notes (edit below then Save Notes)")
+    member_note_edits = {}
+    for t in teams:
+        if t["team_id"] not in team_ids:
+            continue
+        st.markdown(f"**{t['team_name']}**")
+        members = t.get("members", [])
+        if not members:
+            st.markdown("_No members_")
+            continue
+        header_cols = st.columns([1,1,2])
+        header_cols[0].markdown("**Member**")
+        header_cols[1].markdown("**Leads**")
+        header_cols[2].markdown("**Note**")
+        for m in members:
+            m_total = int(period_leads[(period_leads["member_id"] == m["member_id"]) & (period_leads["team_id"] == t["team_id"])]["lead_count"].sum()) if not period_leads.empty else 0
+            prev_note = (m.get("report_notes", {}) or {}).get(period_key, "")
+            cols = st.columns([1,1,2])
+            cols[0].write(m["name"])
+            cols[1].write(int(m_total))
+            note_key = f"note_{t['team_id']}_{m['member_id']}_{period_key}"
+            txt = cols[2].text_area("", value=prev_note, key=note_key, height=80)
+            member_note_edits[(t["team_id"], m["member_id"])] = txt
+
+    if st.button("💾 Save Notes to GitHub"):
+        modified = False
         if edit_team:
-            t_notes = edit_team.get("report_notes", {}) or {}
-            prev_team_note = t_notes.get(period_key, "")
-            new_team_note = st.text_area(f"Team note for {edit_team['team_name']} ({period_label})", value=prev_team_note, height=120, key=f"team_note_{edit_team['team_id']}")
-        else:
-            new_team_note = None
-
-        # Member notes for teams in view (only)
+            if "report_notes" not in edit_team:
+                edit_team["report_notes"] = {}
+            prev = edit_team["report_notes"].get(period_key, "")
+            new = st.session_state.get(f"team_note_{edit_team['team_id']}", "")
+            if new != prev:
+                edit_team["report_notes"][period_key] = new
+                modified = True
         for t in teams:
-            if t["team_id"] not in team_ids:
-                continue
-            st.markdown(f"#### {t['team_name']}")
-            members = t.get("members", [])
-            if not members:
-                st.markdown("_No members_")
-                continue
-            header_cols = st.columns([1,1,2])
-            header_cols[0].markdown("**Member**")
-            header_cols[1].markdown("**Leads**")
-            header_cols[2].markdown("**Note**")
-            for m in members:
-                m_total = int(period_leads[(period_leads["member_id"] == m["member_id"]) & (period_leads["team_id"] == t["team_id"])]["lead_count"].sum()) if not period_leads.empty else 0
-                prev_note = (m.get("report_notes", {}) or {}).get(period_key, "")
-                cols = st.columns([1,1,2])
-                cols[0].write(m["name"])
-                cols[1].write(int(m_total))
-                note_key = f"note_{t['team_id']}_{m['member_id']}_{period_key}"
-                txt = cols[2].text_area("", value=prev_note, key=note_key, height=80)
-                member_note_edits[(t["team_id"], m["member_id"])] = txt
-
-        if st.button("💾 Save Notes to GitHub"):
-            modified = False
-            if edit_team and new_team_note is not None:
-                if "report_notes" not in edit_team:
-                    edit_team["report_notes"] = {}
-                prev = edit_team["report_notes"].get(period_key, "")
-                if new_team_note != prev:
-                    edit_team["report_notes"][period_key] = new_team_note
-                    modified = True
-
-            for t in teams:
-                for m in t.get("members", []):
-                    key = (t["team_id"], m["member_id"])
-                    if key in member_note_edits:
-                        new_note = member_note_edits[key]
-                        if "report_notes" not in m:
-                            m["report_notes"] = {}
-                        prev_note = m["report_notes"].get(period_key, "")
-                        if new_note != prev_note:
-                            m["report_notes"][period_key] = new_note
-                            modified = True
-            if modified:
-                ok = save_data(data, f"Update report notes {period_key}", sha)
-                if ok:
-                    st.success("Notes saved to GitHub ✅")
-                    data, sha = load_data()
-                else:
-                    st.error("Failed to save notes.")
+            for m in t.get("members", []):
+                key = (t["team_id"], m["member_id"])
+                if key in member_note_edits:
+                    new_note = member_note_edits[key]
+                    if "report_notes" not in m:
+                        m["report_notes"] = {}
+                    prev_note = m["report_notes"].get(period_key, "")
+                    if new_note != prev_note:
+                        m["report_notes"][period_key] = new_note
+                        modified = True
+        if modified:
+            ok = save_data(data, f"Update report notes {period_key}", sha)
+            if ok:
+                st.success("Notes saved to GitHub ✅")
+                data, sha = load_data()
             else:
-                st.info("No changes detected.")
-
-    # === Tables ===
-    st.markdown("### 📊 Performance Summary")
-    tabA, tabB = st.tabs(["Team Summary", "Member Details"])
-
-    with tabA:
-        if team_df.empty:
-            st.info("No data for this period.")
+                st.error("Failed to save notes.")
         else:
-            # style % Achieved column
-            try:
-                s = team_df.sort_values("Total Leads", ascending=False)
-                st.dataframe(s.style.applymap(lambda v: pct_to_bg(v) if isinstance(v, (int, float)) else "", subset=["% Achieved"]), use_container_width=True)
-            except Exception:
-                st.dataframe(team_df.sort_values("Total Leads", ascending=False), use_container_width=True)
+            st.info("No changes detected.")
 
-    with tabB:
-        if member_df.empty:
-            st.info("No data for this period.")
-        else:
-            try:
-                s = member_df.sort_values(["Team", "Leads"], ascending=[True, False])
-                st.dataframe(s.style.applymap(lambda v: pct_to_bg(v) if isinstance(v, (int, float)) else "", subset=["% Achieved"]), use_container_width=True)
-            except Exception:
-                st.dataframe(member_df.sort_values(["Team", "Leads"], ascending=[True, False]), use_container_width=True)
+    st.markdown("---")
+    st.markdown("### Team Summary")
+    if team_summary_df.empty:
+        st.write("No teams in view or no data for this period.")
+    else:
+        try:
+            st.dataframe(style_team_table(team_summary_df.sort_values("team_total_leads", ascending=False)), use_container_width=True)
+        except Exception:
+            st.dataframe(team_summary_df.sort_values("team_total_leads", ascending=False), use_container_width=True)
 
-    # === Export ===
-    st.markdown("### 📤 Export Report")
+    st.markdown("### Member Details")
+    if member_summary_df.empty:
+        st.write("No members or no data for this period.")
+    else:
+        try:
+            st.dataframe(style_member_table(member_summary_df.sort_values(["team_name","member_total_leads"], ascending=[True, False])), use_container_width=True)
+        except Exception:
+            st.dataframe(member_summary_df.sort_values(["team_name","member_total_leads"], ascending=[True, False]), use_container_width=True)
+
+    st.markdown("---")
+    st.markdown("### Export Report")
     export_name = f"report_{period_key.replace(':','_')}"
+    c1, c2 = st.columns(2)
+    if c1.button("⬇️ Download CSV"):
+        out_rows = []
+        for _, r in team_summary_df.iterrows():
+            out_rows.append({
+                "level":"team",
+                "team_id": r["team_id"],
+                "team_name": r["team_name"],
+                "name":"",
+                "total_leads": r["team_total_leads"],
+                "target": r["team_target"],
+                "pct": r["team_pct"],
+                "status": r["team_status"],
+                "note": r.get("team_note","")
+            })
+        for _, r in member_summary_df.iterrows():
+            out_rows.append({
+                "level":"member",
+                "team_id": r["team_id"],
+                "team_name": r["team_name"],
+                "name": r["member_name"],
+                "total_leads": r["member_total_leads"],
+                "target": r["member_target"],
+                "pct": r["member_pct"],
+                "status": r["member_status"],
+                "note": r.get("member_note","")
+            })
+        out_df = pd.DataFrame(out_rows)
+        csv_bytes = out_df.to_csv(index=False).encode("utf-8")
+        st.download_button("Download CSV file", data=csv_bytes, file_name=f"{export_name}.csv", mime="text/csv")
 
-    col1, col2 = st.columns(2)
-
-    # CSV Export (team + member combined)
-    out_rows = []
-    for _, r in team_df.iterrows():
-        out_rows.append({
-            "level": "team",
-            "team_id": r.get("team_id", ""),
-            "team_name": r.get("Team", ""),
-            "name": "",
-            "total_leads": r.get("Total Leads", 0),
-            "target": r.get("Target", 0),
-            "pct": r.get("% Achieved", 0),
-            "status": r.get("Status", ""),
-            "note": r.get("team_note", "")
-        })
-    for _, r in member_df.iterrows():
-        out_rows.append({
-            "level": "member",
-            "team_id": r.get("team_id", ""),
-            "team_name": r.get("Team", ""),
-            "name": r.get("Member", ""),
-            "total_leads": r.get("Leads", 0),
-            "target": r.get("Target", 0),
-            "pct": r.get("% Achieved", 0),
-            "status": r.get("Status", ""),
-            "note": r.get("member_note", "")
-        })
-    out_df = pd.DataFrame(out_rows)
-
-    # CSV download
-    csv_bytes = out_df.to_csv(index=False).encode("utf-8")
-    col1.download_button("⬇️ Download CSV", data=csv_bytes, file_name=f"{export_name}.csv", mime="text/csv")
-
-    # Excel download (fixed: build buffer first, then pass bytes)
-    excel_buffer = io.BytesIO()
-    with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:
-        if not team_df.empty:
-            team_df.to_excel(writer, sheet_name="Teams", index=False)
-        if not member_df.empty:
-            member_df.to_excel(writer, sheet_name="Members", index=False)
-        # Optionally include raw out_df
-        out_df.to_excel(writer, sheet_name="Combined", index=False)
-    excel_buffer.seek(0)
-    col2.download_button(
-        "⬇️ Download Excel (.xlsx)",
-        data=excel_buffer.getvalue(),
-        file_name=f"{export_name}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+    if c2.button("⬇️ Download Excel (.xlsx)"):
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            if not team_summary_df.empty:
+                team_summary_df.to_excel(writer, sheet_name="Teams", index=False)
+            if not member_summary_df.empty:
+                member_summary_df.to_excel(writer, sheet_name="Members", index=False)
+        output.seek(0)
+        st.download_button("Download Excel file", data=output.getvalue(), file_name=f"{export_name}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # Admin Panel
 with tabs[3]:
@@ -775,10 +774,10 @@ with tabs[3]:
                 new_tname = st.text_input("Team name", value=team["team_name"], key=f"tname_{t_idx}")
                 if new_tname != team["team_name"]:
                     # ensure unique team names
-                    if any(t2["team_name"].strip().lower() == new_tname.strip().lower() for t2 in teams_list if t2 is not team):
+                    if any(t2["team_name"] == new_tname for t2 in teams_list if t2 is not team):
                         st.error("A team with this name already exists.")
                     else:
-                        team["team_name"] = new_tname.strip()
+                        team["team_name"] = new_tname
                         if save_data(data, f"Rename team {new_tname}", sha):
                             st.success("Team name updated")
                             st.experimental_rerun()
@@ -804,7 +803,7 @@ with tabs[3]:
                                 st.error("Tick 'Confirm' to delete member")
 
                     if nm != member["name"] or wk != member.get("weekly_target", 0) or mo != member.get("monthly_target", 0):
-                        member["name"] = nm.strip()
+                        member["name"] = nm
                         member["weekly_target"] = int(wk)
                         member["monthly_target"] = int(mo)
                         if save_data(data, f"Update member {nm}", sha):
@@ -860,7 +859,7 @@ with tabs[3]:
             with cols[2]:
                 nmth = st.number_input("Monthly target", min_value=0, key=f"new_m_{i}")
             nm_str = nm.strip()
-            if nm_str and nm_str.lower() in (s.lower() for s in seen if s):
+            if nm_str.lower() in (s.lower() for s in seen if s):
                 duplicate_name = True
             seen.add(nm_str)
             new_members.append({
@@ -882,3 +881,5 @@ with tabs[3]:
                 if save_data(data, f"Add team {new_team_name}", sha):
                     st.success("Team added")
                     st.experimental_rerun()
+
+# End of file
