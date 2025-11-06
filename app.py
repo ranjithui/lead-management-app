@@ -345,7 +345,8 @@ with tabs[1]:
             if pw == UPDATE_PASSWORD:
                 st.session_state.daily_auth = True
                 st.success("Daily Update unlocked ✅")
-                st.experimental_rerun()
+                st.rerun()
+
             else:
                 st.error("Wrong password")
         st.stop()
@@ -403,7 +404,8 @@ with tabs[2]:
             if pw == REPORT_PASSWORD:
                 st.session_state.report_auth = True
                 st.success("Reports unlocked ✅")
-                st.experimental_rerun()
+                st.rerun()
+
             else:
                 st.error("Wrong password")
         st.stop()
@@ -663,7 +665,8 @@ with tabs[3]:
             if pw == ADMIN_PASSWORD:
                 st.session_state.admin_auth = True
                 st.success("Admin unlocked ✅")
-                st.experimental_rerun()
+                st.rerun()
+
             else:
                 st.error("Wrong password")
         st.stop()
