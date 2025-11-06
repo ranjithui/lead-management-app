@@ -310,6 +310,10 @@ if sha is None and data.get("teams", []) == [] and data.get("leads", []) == []:
 # -----------------------
 # Sidebar: centralized auth controls (always visible)
 # -----------------------
+# -----------------------
+# Sidebar: centralized auth controls (always visible)
+# -----------------------
+# ensure keys exist
 if "daily_auth" not in st.session_state:
     st.session_state["daily_auth"] = False
 if "report_auth" not in st.session_state:
@@ -321,54 +325,55 @@ st.sidebar.header("🔐 Authentication")
 
 # Daily Update auth
 with st.sidebar.expander("Daily Update", expanded=True):
-    if st.session_state.daily_auth:
+    if st.session_state.get("daily_auth", False):
         st.success("Daily Update: unlocked")
-        if st.button("Lock Daily Update"):
-            st.session_state.daily_auth = False
+        if st.sidebar.button("Lock Daily Update", key="lock_daily_btn"):
+            st.session_state["daily_auth"] = False
             st.experimental_rerun()
     else:
-        daily_pw = st.text_input("Daily password", type="password", key="sidebar_daily_pw")
-        if st.button("Unlock Daily Update"):
+        daily_pw = st.sidebar.text_input("Daily password", type="password", key="sidebar_daily_pw")
+        if st.sidebar.button("Unlock Daily Update", key="unlock_daily_btn"):
             if daily_pw == UPDATE_PASSWORD:
-                st.session_state.daily_auth = True
+                st.session_state["daily_auth"] = True
                 st.success("Daily Update unlocked ✅")
-                st.rerun()
+                st.experimental_rerun()
             else:
                 st.error("Wrong password")
 
 # Reports auth
 with st.sidebar.expander("Reports", expanded=False):
-    if st.session_state.report_auth:
+    if st.session_state.get("report_auth", False):
         st.success("Reports: unlocked")
-        if st.button("Lock Reports"):
-            st.session_state.report_auth = False
+        if st.sidebar.button("Lock Reports", key="lock_reports_btn"):
+            st.session_state["report_auth"] = False
             st.experimental_rerun()
     else:
-        report_pw = st.text_input("Reports password", type="password", key="sidebar_report_pw")
-        if st.button("Unlock Reports"):
+        report_pw = st.sidebar.text_input("Reports password", type="password", key="sidebar_report_pw")
+        if st.sidebar.button("Unlock Reports", key="unlock_reports_btn"):
             if report_pw == REPORT_PASSWORD:
-                st.session_state.report_auth = True
+                st.session_state["report_auth"] = True
                 st.success("Reports unlocked ✅")
-                st.rerun()
+                st.experimental_rerun()
             else:
                 st.error("Wrong password")
 
 # Admin auth
 with st.sidebar.expander("Admin Panel", expanded=False):
-    if st.session_state.admin_auth:
+    if st.session_state.get("admin_auth", False):
         st.success("Admin: unlocked")
-        if st.button("Lock Admin Panel"):
-            st.session_state.admin_auth = False
+        if st.sidebar.button("Lock Admin Panel", key="lock_admin_btn"):
+            st.session_state["admin_auth"] = False
             st.experimental_rerun()
     else:
-        admin_pw = st.text_input("Admin password", type="password", key="sidebar_admin_pw")
-        if st.button("Unlock Admin Panel"):
+        admin_pw = st.sidebar.text_input("Admin password", type="password", key="sidebar_admin_pw")
+        if st.sidebar.button("Unlock Admin Panel", key="unlock_admin_btn"):
             if admin_pw == ADMIN_PASSWORD:
-                st.session_state.admin_auth = True
+                st.session_state["admin_auth"] = True
                 st.success("Admin unlocked ✅")
-                st.rerun()
+                st.experimental_rerun()
             else:
                 st.error("Wrong password")
+
 
 # Tabs
 tabs = st.tabs(["Dashboard", "Daily Update", "Reports", "Admin Panel"]) 
