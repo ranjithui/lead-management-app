@@ -1,12 +1,12 @@
-# app.py
+# app_fixed.py
 """
-Lead Management App — production-ready with:
- - Dashboard (public landing page, always visible)
- - Password-protected tabs: Daily Update, Reports, Admin Panel (each with separate password)
- - Compact "All Teams" Dashboard with top summary
- - Enhanced Reporting (Weekly/Monthly) with color-coded performance, team & member notes saved to GitHub
- - CSV + Excel export
- - GitHub Contents API sync for data/leads_data.json
+Lead Management App — production-ready with some fixes & improvements
+- More robust GitHub auth header (Bearer)
+- load_data returns decoded data and sha reliably
+- "This Week" uses start-of-week (Monday) instead of 'last 7 days'
+- Today's leads calculation uses date equality (not timestamp equality)
+- Small UX: require confirmation checkbox before destructive deletes
+- Minor validation on add team/members
 """
 
 import streamlit as st
@@ -21,18 +21,6 @@ import io
 # -----------------------
 # Config / Secrets
 # -----------------------
-# Expected structure in st.secrets:
-# [github]
-# token = "ghp_xxx"
-# repo_owner = "your-github-username"
-# repo_name = "your-repo-name"
-# data_path = "data/leads_data.json"
-#
-# [passwords]
-# admin = "Admin@2025"
-# report = "Report@2025"
-# update = "Update@2025"
-
 GITHUB = st.secrets.get("github", {}) if st.secrets is not None else {}
 PASSWORDS = st.secrets.get("passwords", {}) if st.secrets is not None else {}
 
@@ -40,9 +28,8 @@ GITHUB_TOKEN = GITHUB.get("token", "")
 REPO_OWNER = GITHUB.get("repo_owner", "")
 REPO_NAME = GITHUB.get("repo_name", "")
 DATA_PATH = GITHUB.get("data_path", "data/leads_data.json")
-HEADERS = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
+HEADERS = {"Authorization": f"Bearer {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
 
-# Password fallbacks (if not provided in secrets)
 ADMIN_PASSWORD = PASSWORDS.get("admin", "Admin@2025")
 REPORT_PASSWORD = PASSWORDS.get("report", "Report@2025")
 UPDATE_PASSWORD = PASSWORDS.get("update", "Update@2025")
@@ -50,32 +37,39 @@ UPDATE_PASSWORD = PASSWORDS.get("update", "Update@2025")
 # -----------------------
 # GitHub helpers
 # -----------------------
+
 def gh_api_url():
     return f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{DATA_PATH}"
 
+
 def load_data():
+    """Return (data_dict, sha) — if repo missing or errors, returns empty structure and None sha."""
     url = gh_api_url()
     if not REPO_OWNER or not REPO_NAME:
         st.error("GitHub repo_owner/repo_name not set in st.secrets.github.")
         return {"teams": [], "leads": []}, None
     try:
-        res = requests.get(url, headers=HEADERS)
+        res = requests.get(url, headers=HEADERS, timeout=15)
     except Exception as e:
         st.error(f"GitHub request failed: {e}")
         return {"teams": [], "leads": []}, None
     if res.status_code == 200:
         payload = res.json()
-        content = b64decode(payload.get("content", "")).decode()
+        content_b64 = payload.get("content", "")
         try:
+            content = b64decode(content_b64).decode()
             data = json.loads(content)
             return data, payload.get("sha")
-        except Exception:
-            return {"teams": [], "leads": []}, None
+        except Exception as e:
+            st.error(f"Failed to parse repo content: {e}")
+            return {"teams": [], "leads": []}, payload.get("sha")
     elif res.status_code == 404:
+        # file not present yet
         return {"teams": [], "leads": []}, None
     else:
         st.error(f"GitHub read error {res.status_code}: {res.text}")
         return {"teams": [], "leads": []}, None
+
 
 def save_data(data, message, sha=None):
     url = gh_api_url()
@@ -87,11 +81,13 @@ def save_data(data, message, sha=None):
     if sha:
         body["sha"] = sha
     try:
-        res = requests.put(url, headers=HEADERS, data=json.dumps(body))
+        res = requests.put(url, headers=HEADERS, data=json.dumps(body), timeout=15)
     except Exception as e:
         st.error(f"GitHub write request failed: {e}")
         return False
     if res.status_code in (200, 201):
+        # optionally update an in-session marker
+        st.session_state["last_save"] = datetime.utcnow().isoformat()
         return True
     else:
         st.error(f"GitHub write error {res.status_code}: {res.text}")
@@ -100,14 +96,18 @@ def save_data(data, message, sha=None):
 # -----------------------
 # Utilities
 # -----------------------
+
 def gen_id(prefix="ID"):
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
+
 
 def flatten_members(data):
     members = []
     for t in data.get("teams", []):
         for m in t.get("members", []):
             mm = m.copy()
+            mm.setdefault("weekly_target", 0)
+            mm.setdefault("monthly_target", 0)
             mm["team_id"] = t["team_id"]
             mm["team_name"] = t["team_name"]
             members.append(mm)
@@ -116,21 +116,23 @@ def flatten_members(data):
 # -----------------------
 # Aggregation helpers
 # -----------------------
+
 def calc_totals(leads_df, members_df, period="All Time"):
     if leads_df is None or leads_df.empty:
         member_cols = ["member_id", "name", "team_id", "team_name", "total_leads", "weekly_target", "monthly_target", "weekly_pct", "monthly_pct"]
-        return pd.DataFrame(columns=member_cols), pd.DataFrame(columns=["team_id", "team_name", "team_leads", "avg_weekly_pct", "avg_monthly_pct"])
+        return pd.DataFrame(columns=member_cols), pd.DataFrame(columns=["team_id", "team_name", "team_leads", "avg_weekly_pct", "avg_monthly_pct"]) 
 
     df = leads_df.copy()
-    df["date"] = pd.to_datetime(df["date"])
-    today = pd.to_datetime(date.today())
+    df["date"] = pd.to_datetime(df["date"]).dt.date
+    today = date.today()
 
     if period == "This Week":
-        cutoff = today - pd.Timedelta(days=7)
-        df = df[df["date"] >= cutoff]
+        # start of current ISO week (Monday)
+        start_of_week = today - timedelta(days=today.weekday())
+        df = df[df["date"] >= start_of_week]
     elif period == "This Month":
-        cutoff = today.replace(day=1)
-        df = df[df["date"] >= cutoff]
+        start_of_month = today.replace(day=1)
+        df = df[df["date"] >= start_of_month]
 
     member_tot = df.groupby("member_id", as_index=False)["lead_count"].sum().rename(columns={"lead_count": "total_leads"})
     if members_df is None or members_df.empty:
@@ -138,14 +140,8 @@ def calc_totals(leads_df, members_df, period="All Time"):
 
     merged = members_df.merge(member_tot, on="member_id", how="left")
     merged["total_leads"] = merged["total_leads"].fillna(0).astype(int)
-    if "weekly_target" in merged:
-        merged["weekly_target"] = merged["weekly_target"].fillna(0).astype(int)
-    else:
-        merged["weekly_target"] = 0
-    if "monthly_target" in merged:
-        merged["monthly_target"] = merged["monthly_target"].fillna(0).astype(int)
-    else:
-        merged["monthly_target"] = 0
+    merged["weekly_target"] = merged.get("weekly_target", 0).fillna(0).astype(int) if hasattr(merged, 'get') else merged.setdefault("weekly_target", 0)
+    merged["monthly_target"] = merged.get("monthly_target", 0).fillna(0).astype(int) if hasattr(merged, 'get') else merged.setdefault("monthly_target", 0)
 
     merged["weekly_pct"] = merged.apply(lambda r: (r["total_leads"] / r["weekly_target"] * 100) if r.get("weekly_target",0) > 0 else 0, axis=1)
     merged["monthly_pct"] = merged.apply(lambda r: (r["total_leads"] / r["monthly_target"] * 100) if r.get("monthly_target",0) > 0 else 0, axis=1)
@@ -174,16 +170,18 @@ BASE_CSS = """
 </style>
 """
 
+
 def progress_color_and_width(pct):
     pct = max(0.0, float(pct))
     if pct < 60:
-        color = "#e24b4b"  # red
+        color = "#e24b4b"
     elif pct < 90:
-        color = "#f0b429"  # orange
+        color = "#f0b429"
     else:
-        color = "#16a34a"  # green
+        color = "#16a34a"
     width = min(round(pct, 1), 100)
     return color, width
+
 
 def render_progress_bar_html(pct, label_text):
     color, width = progress_color_and_width(pct)
@@ -201,28 +199,35 @@ def render_progress_bar_html(pct, label_text):
 # -----------------------
 # Small helpers for table coloring (pandas Styler)
 # -----------------------
+
 def pct_to_bg(pct):
     try:
         pct = float(pct)
     except Exception:
         return ""
     if pct >= 90:
-        return "background-color: #d1fae5;"  # light green
+        return "background-color: #d1fae5;"
     if pct >= 60:
-        return "background-color: #fff7ed;"  # light orange
+        return "background-color: #fff7ed;"
     if pct > 0:
-        return "background-color: #ffe4e6;"  # light red
+        return "background-color: #ffe4e6;"
     return ""
 
+
 def style_member_table(df):
-    # apply to member_pct column
     if df.empty:
+        return df
+    # ensure the column exists
+    if "member_pct" not in df.columns:
         return df
     sty = df.style.applymap(lambda v: pct_to_bg(v) if isinstance(v, (int, float)) else "", subset=["member_pct"])
     return sty
 
+
 def style_team_table(df):
     if df.empty:
+        return df
+    if "team_pct" not in df.columns:
         return df
     sty = df.style.applymap(lambda v: pct_to_bg(v) if isinstance(v, (int, float)) else "", subset=["team_pct"])
     return sty
@@ -232,7 +237,7 @@ def style_team_table(df):
 # -----------------------
 st.set_page_config(page_title="Lead Management", layout="wide")
 st.markdown(BASE_CSS, unsafe_allow_html=True)
-st.title("📊 Lead Management — Unified Dashboard")
+st.title("📊 Lead Management — Unified Dashboard (fixed)")
 
 # Load data
 data, sha = load_data()
@@ -243,12 +248,10 @@ if sha is None and data.get("teams", []) == [] and data.get("leads", []) == []:
     if created:
         data, sha = load_data()
 
-# Tabs (Dashboard is first and public)
-tabs = st.tabs(["Dashboard", "Daily Update", "Reports", "Admin Panel"])
+# Tabs
+tabs = st.tabs(["Dashboard", "Daily Update", "Reports", "Admin Panel"]) 
 
-# -----------------------
-# Dashboard (public landing)
-# -----------------------
+# Dashboard
 with tabs[0]:
     st.subheader("📈 Dashboard — Overview (public)")
     period = st.selectbox("Period filter", ["All Time", "This Month", "This Week"], index=0, key="dash_period")
@@ -262,7 +265,6 @@ with tabs[0]:
     else:
         member_agg, team_agg = calc_totals(leads_df, members_df, period=period)
         teams = data.get("teams", [])
-        # Summary
         total_teams = len(teams)
         total_members = len(members_df)
         total_leads = int(leads_df["lead_count"].sum()) if not leads_df.empty else 0
@@ -287,7 +289,6 @@ with tabs[0]:
         </div>
         """, unsafe_allow_html=True)
 
-        # Compact team cards
         for team in teams:
             t_id = team["team_id"]
             trow = team_agg[team_agg["team_id"] == t_id] if not team_agg.empty else pd.DataFrame()
@@ -331,9 +332,7 @@ with tabs[0]:
 
             st.markdown("</div>", unsafe_allow_html=True)
 
-# -----------------------
-# Tab: Daily Update (password protected - separate credential)
-# -----------------------
+# Daily Update
 with tabs[1]:
     st.header("🕘 Daily Update (password required)")
 
@@ -351,7 +350,6 @@ with tabs[1]:
                 st.error("Wrong password")
         st.stop()
 
-    # Daily update form (once authenticated)
     teams = data.get("teams", [])
     if not teams:
         st.info("No teams defined. Create them in Admin Panel before logging leads.")
@@ -388,14 +386,11 @@ with tabs[1]:
             if leads_all.empty:
                 st.write("No leads yet.")
             else:
-                leads_all["date"] = pd.to_datetime(leads_all["date"])
-                today = pd.to_datetime(date.today())
-                today_total = int(leads_all[leads_all["date"] == today]["lead_count"].sum())
+                leads_all["date"] = pd.to_datetime(leads_all["date"]).dt.date
+                today_total = int(leads_all[leads_all["date"] == date.today()]["lead_count"].sum())
                 st.metric("Today's leads", today_total)
 
-# -----------------------
-# Tab: Reports (password protected - separate credential)
-# -----------------------
+# Reports
 with tabs[2]:
     st.header("📜 Reports — Weekly / Monthly (password required)")
 
@@ -413,7 +408,6 @@ with tabs[2]:
                 st.error("Wrong password")
         st.stop()
 
-    # Reports UI (authenticated)
     st.markdown("Use the controls to pick Weekly or Monthly period, filter by team, add notes, and export.")
     period_type = st.selectbox("Report type", ["Weekly", "Monthly"], index=0, key="report_type")
 
@@ -439,8 +433,8 @@ with tabs[2]:
     members_df = pd.DataFrame(members_flat) if members_flat else pd.DataFrame(columns=["member_id","name","team_id","team_name","weekly_target","monthly_target"])
 
     if not leads_df.empty:
-        leads_df["date"] = pd.to_datetime(leads_df["date"])
-        mask = (leads_df["date"] >= pd.to_datetime(start_dt)) & (leads_df["date"] <= pd.to_datetime(end_dt))
+        leads_df["date"] = pd.to_datetime(leads_df["date"]).dt.date
+        mask = (leads_df["date"] >= pd.to_datetime(start_dt).date()) & (leads_df["date"] <= pd.to_datetime(end_dt).date())
         period_leads = leads_df.loc[mask].copy()
     else:
         period_leads = pd.DataFrame(columns=["date","team_id","member_id","lead_count","notes"])
@@ -509,7 +503,6 @@ with tabs[2]:
     team_summary_df = pd.DataFrame(team_rows)
     member_summary_df = pd.DataFrame(member_rows)
 
-    # Top summary metrics
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Teams in view", team_summary_df.shape[0])
     col2.metric("Members in view", member_summary_df.shape[0])
@@ -599,7 +592,6 @@ with tabs[2]:
     if team_summary_df.empty:
         st.write("No teams in view or no data for this period.")
     else:
-        # show styled table
         try:
             st.dataframe(style_team_table(team_summary_df.sort_values("team_total_leads", ascending=False)), use_container_width=True)
         except Exception:
@@ -658,9 +650,7 @@ with tabs[2]:
         output.seek(0)
         st.download_button("Download Excel file", data=output.getvalue(), file_name=f"{export_name}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-# -----------------------
-# Tab: Admin Panel (password protected - separate credential)
-# -----------------------
+# Admin Panel
 with tabs[3]:
     st.header("🧑‍💼 Admin Panel (password required)")
 
@@ -702,11 +692,15 @@ with tabs[3]:
                     with cols[2]:
                         mo = st.number_input("Monthly target", min_value=0, value=int(member.get("monthly_target", 0)), key=f"mo_{t_idx}_{m_idx}")
                     with cols[3]:
-                        if st.button("🗑️", key=f"delm_{t_idx}_{m_idx}"):
-                            team["members"].pop(m_idx)
-                            if save_data(data, f"Delete member {member['name']}", sha):
-                                st.success("Member deleted")
-                                st.experimental_rerun()
+                        confirm_del = st.checkbox("Confirm", key=f"confirm_del_{t_idx}_{m_idx}")
+                        if st.button("🗑️ Delete", key=f"delm_{t_idx}_{m_idx}"):
+                            if confirm_del:
+                                team["members"].pop(m_idx)
+                                if save_data(data, f"Delete member {member['name']}", sha):
+                                    st.success("Member deleted")
+                                    st.experimental_rerun()
+                            else:
+                                st.error("Tick 'Confirm' to delete member")
 
                     if nm != member["name"] or wk != member.get("weekly_target", 0) or mo != member.get("monthly_target", 0):
                         member["name"] = nm
@@ -736,11 +730,15 @@ with tabs[3]:
                                 st.experimental_rerun()
 
                 st.markdown("---")
+                confirm_team_del = st.checkbox("Confirm", key=f"confirm_delteam_{t_idx}")
                 if st.button(f"🗑️ Delete team '{team['team_name']}'", key=f"delteam_{t_idx}"):
-                    data["teams"].remove(team)
-                    if save_data(data, f"Delete team {team['team_name']}", sha):
-                        st.success("Team deleted")
-                        st.experimental_rerun()
+                    if confirm_team_del:
+                        data["teams"].remove(team)
+                        if save_data(data, f"Delete team {team['team_name']}", sha):
+                            st.success("Team deleted")
+                            st.experimental_rerun()
+                    else:
+                        st.error("Tick 'Confirm' to delete team")
 
     st.divider()
     st.subheader("➕ Add new team")
@@ -748,6 +746,8 @@ with tabs[3]:
         new_team_name = st.text_input("Team name")
         new_n = st.number_input("No. of members", min_value=1, max_value=50, value=2)
         new_members = []
+        duplicate_name = False
+        seen = set()
         for i in range(int(new_n)):
             cols = st.columns([3, 1, 1])
             with cols[0]:
@@ -756,6 +756,9 @@ with tabs[3]:
                 nw = st.number_input("Weekly target", min_value=0, key=f"new_w_{i}")
             with cols[2]:
                 nmth = st.number_input("Monthly target", min_value=0, key=f"new_m_{i}")
+            if nm.strip() in seen:
+                duplicate_name = True
+            seen.add(nm.strip())
             new_members.append({
                 "name": nm.strip(),
                 "member_id": gen_id("M"),
@@ -765,6 +768,8 @@ with tabs[3]:
         if st.form_submit_button("Save team"):
             if not new_team_name.strip() or any(m["name"] == "" for m in new_members):
                 st.error("Fill all fields")
+            elif duplicate_name:
+                st.error("Duplicate member names detected")
             else:
                 new_team = {"team_id": gen_id("T"), "team_name": new_team_name.strip(), "members": new_members}
                 data.setdefault("teams", []).append(new_team)
@@ -772,4 +777,4 @@ with tabs[3]:
                     st.success("Team added")
                     st.experimental_rerun()
 
-# End of app
+# End of file
