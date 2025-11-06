@@ -377,7 +377,7 @@ with tabs[1]:
                 data.setdefault("leads", []).append(entry)
                 if save_data(data, f"Add lead: {member_choice} {entry['date']}", sha):
                     st.success("Lead saved ✅")
-                   st.rerun()
+                    st.experimental_rerun()
                 else:
                     st.error("Failed to save lead. Check GitHub permissions & token.")
 
