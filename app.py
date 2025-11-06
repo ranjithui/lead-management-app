@@ -342,18 +342,16 @@ with tabs[1]:
 
     if not st.session_state.daily_auth:
         pw = st.text_input("Enter Daily Update password", type="password", key="daily_pw_input")
-       if st.button("Unlock Daily Update"):
-    if pw == UPDATE_PASSWORD:
-        st.session_state.daily_auth = True
-        st.success("Daily Update unlocked ✅")
-        try:
-            st.experimental_rerun()
-        except st.runtime.scriptrunner.RerunException:
-            pass
-    else:
-        st.error("Wrong password")
-st.stop()
-   # Daily update form (once authenticated)
+        if st.button("Unlock Daily Update"):
+            if pw == UPDATE_PASSWORD:
+                st.session_state.daily_auth = True
+                st.success("Daily Update unlocked ✅")
+                st.experimental_rerun()
+            else:
+                st.error("Wrong password")
+        st.stop()
+
+    # Daily update form (once authenticated)
     teams = data.get("teams", [])
     if not teams:
         st.info("No teams defined. Create them in Admin Panel before logging leads.")
@@ -407,17 +405,13 @@ with tabs[2]:
     if not st.session_state.report_auth:
         pw = st.text_input("Enter Reports password", type="password", key="report_pw_input")
         if st.button("Unlock Reports"):
-    if pw == REPORT_PASSWORD:
-        st.session_state.report_auth = True
-        st.success("Reports unlocked ✅")
-        try:
-            st.experimental_rerun()
-        except st.runtime.scriptrunner.RerunException:
-            pass
-    else:
-        st.error("Wrong password")
-st.stop()
-
+            if pw == REPORT_PASSWORD:
+                st.session_state.report_auth = True
+                st.success("Reports unlocked ✅")
+                st.experimental_rerun()
+            else:
+                st.error("Wrong password")
+        st.stop()
 
     # Reports UI (authenticated)
     st.markdown("Use the controls to pick Weekly or Monthly period, filter by team, add notes, and export.")
@@ -676,17 +670,13 @@ with tabs[3]:
     if not st.session_state.admin_auth:
         pw = st.text_input("Enter Admin password", type="password", key="admin_pw_input")
         if st.button("Unlock Admin Panel"):
-    if pw == ADMIN_PASSWORD:
-        st.session_state.admin_auth = True
-        st.success("Admin unlocked ✅")
-        try:
-            st.experimental_rerun()
-        except st.runtime.scriptrunner.RerunException:
-            pass
-    else:
-        st.error("Wrong password")
-st.stop()
-
+            if pw == ADMIN_PASSWORD:
+                st.session_state.admin_auth = True
+                st.success("Admin unlocked ✅")
+                st.experimental_rerun()
+            else:
+                st.error("Wrong password")
+        st.stop()
 
     st.subheader("Manage existing teams")
     teams_list = data.get("teams", [])
